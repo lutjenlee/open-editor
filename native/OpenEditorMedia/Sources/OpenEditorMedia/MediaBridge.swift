@@ -1,6 +1,7 @@
 import AppKit
 import AVFoundation
 import CoreMedia
+import Darwin
 
 @MainActor
 final class PreviewController {
@@ -102,4 +103,42 @@ public func playerSeek(_ handle: UnsafeMutableRawPointer?, _ value: Int64, _ tim
         toleranceBefore: .zero,
         toleranceAfter: .zero
     )
+}
+
+@_cdecl("oe_bookmark_create")
+public func bookmarkCreate(_ path: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>? {
+    guard let path else { return nil }
+    let url = URL(fileURLWithPath: String(cString: path))
+    guard let data = try? url.bookmarkData(
+        options: .withSecurityScope,
+        includingResourceValuesForKeys: nil,
+        relativeTo: nil
+    ) else { return nil }
+    return strdup(data.base64EncodedString())
+}
+
+@_cdecl("oe_bookmark_resolve")
+public func bookmarkResolve(_ encoded: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>? {
+    guard let encoded,
+          let data = Data(base64Encoded: String(cString: encoded)) else { return nil }
+    var stale = false
+    guard let url = try? URL(
+        resolvingBookmarkData: data,
+        options: [.withSecurityScope, .withoutUI],
+        relativeTo: nil,
+        bookmarkDataIsStale: &stale
+    ), !stale, url.startAccessingSecurityScopedResource() else { return nil }
+    return strdup(url.path)
+}
+
+@_cdecl("oe_bookmark_release")
+public func bookmarkRelease(_ path: UnsafePointer<CChar>?) {
+    // Access is process-scoped in V0.1 and ends when the app exits. Project-session
+    // handles will balance this call when multi-project windows are introduced.
+    _ = path
+}
+
+@_cdecl("oe_string_free")
+public func stringFree(_ value: UnsafeMutablePointer<CChar>?) {
+    free(value)
 }

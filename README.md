@@ -3,7 +3,7 @@
 Open Editor is an open-source, local-first macOS video editor designed for natural-language editing. Bring your existing ChatGPT/Codex account or a local Ollama model; the editor turns approved model tool calls into the same validated, undoable commands used by its manual timeline controls.
 
 > [!IMPORTANT]
-> Open Editor is early-stage software. The current build supports folder projects, real FFprobe inspection, generated thumbnails/waveforms, local media preview, command-based timeline edits, undo/redo, and a first H.264/AAC export path. It is not ready for production editing yet.
+> Open Editor is early-stage software. The current build supports folder projects, persistent macOS media bookmarks and relinking, real FFprobe inspection, generated thumbnails/waveforms/proxies, local scene and silence analysis, local media preview, command-based timeline edits, undo/redo, and a first H.264/AAC export path. It is not ready for production editing yet.
 
 ## Product principles
 
@@ -83,7 +83,7 @@ Current local workflow:
 4. Move, split, delete, undo, redo, save, reopen, and preview selected media.
 5. Export the video track to a local H.264/AAC MP4.
 
-Still in progress before the provider milestone: native AVFoundation composition playback, complete multitrack audio/overlay/caption rendering, security-scoped bookmark persistence, proxy jobs, transcription/scene analysis, and release-sidecar packaging.
+Still in progress before the provider milestone: native AVFoundation composition playback, complete multitrack audio/overlay/caption rendering, cancellable background-job progress, offline transcription, the local MCP adapter, and release-sidecar packaging.
 
 ## License
 

@@ -18,7 +18,7 @@ Every manual or agent edit becomes an `EditorCommand` envelope containing a comm
 
 ## Portable projects
 
-`open-editor.project.json` is the versioned, human-readable source of truth. The hidden `.open-editor` directory holds history, chats, and reconstructable caches. In-project media uses relative paths. External media will use a display path and macOS security-scoped bookmark; an invalid bookmark requires an explicit relink.
+`open-editor.project.json` is the versioned, human-readable source of truth. The hidden `.open-editor` directory holds history, chats, and reconstructable caches. In-project media uses relative paths. External media stores a display path plus a macOS security-scoped bookmark; an invalid or missing file is surfaced for explicit relinking.
 
 ## Agent isolation
 
@@ -28,4 +28,4 @@ Ollama is contacted only on loopback. Models must pass a structured-tool capabil
 
 ## Media path
 
-The current functional preview uses the Tauri asset protocol for user-selected local media, and the first export implementation uses FFmpeg. The native Swift/AVFoundation package remains the intended composition preview and normal-export path before release. FFmpeg and FFprobe currently handle inspection, thumbnails, waveform generation, and the validated fallback export. The release build will bundle an LGPL-compatible FFmpeg configuration without GPL or nonfree components. `whisper.cpp` transcription remains a later local-analysis milestone.
+The current functional preview uses the Tauri asset protocol for user-selected local media, automatically preferring a generated proxy, and the first export implementation uses FFmpeg. The native Swift/AVFoundation package remains the intended composition preview and normal-export path before release. FFmpeg and FFprobe currently handle inspection, thumbnails, waveform generation, proxies, scene/keyframe extraction, silence detection, and the validated fallback export. Analysis artifacts are recorded in the portable project document while their derived files remain reconstructable cache data. The release build will bundle an LGPL-compatible FFmpeg configuration without GPL or nonfree components. `whisper.cpp` transcription remains a later local-analysis milestone.

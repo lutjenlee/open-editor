@@ -9,6 +9,21 @@ use uuid::Uuid;
 
 use crate::project::RationalTime;
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SilenceRange {
+    pub start: RationalTime,
+    pub end: RationalTime,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalAnalysis {
+    pub scene_times: Vec<RationalTime>,
+    pub silence_ranges: Vec<SilenceRange>,
+    pub keyframe_paths: Vec<String>,
+}
+
 #[derive(Debug, Error, Serialize)]
 pub enum MediaError {
     #[error("Media tool not found: {0}")]
@@ -32,6 +47,7 @@ pub struct MediaInspection {
     pub height: Option<u32>,
     pub codec: Option<String>,
     pub has_audio: bool,
+    pub bookmark: Option<String>,
     pub thumbnail_path: Option<String>,
     pub waveform_path: Option<String>,
 }
@@ -178,8 +194,148 @@ pub fn inspect(path: &Path, project_folder: &Path) -> Result<MediaInspection, Me
             .and_then(|stream| stream["codec_name"].as_str())
             .map(str::to_string),
         has_audio: audio.is_some(),
+        bookmark: crate::native::create_security_bookmark(path),
         thumbnail_path: thumbnail,
         waveform_path: waveform,
+    })
+}
+
+fn run_ffmpeg(args: &[String]) -> Result<std::process::Output, MediaError> {
+    Command::new(tool("ffmpeg")?)
+        .args(args)
+        .output()
+        .map_err(|error| MediaError::Failed(error.to_string()))
+}
+
+pub fn create_proxy(
+    source: &Path,
+    project_folder: &Path,
+    asset_id: Uuid,
+) -> Result<String, MediaError> {
+    let output_path = project_folder
+        .join(".open-editor/proxies")
+        .join(format!("{asset_id}.mp4"));
+    let base = vec![
+        "-hide_banner".into(),
+        "-loglevel".into(),
+        "error".into(),
+        "-y".into(),
+        "-i".into(),
+        source.display().to_string(),
+        "-vf".into(),
+        "scale='min(1280,iw)':-2".into(),
+        "-c:a".into(),
+        "aac".into(),
+        "-b:a".into(),
+        "160k".into(),
+        "-movflags".into(),
+        "+faststart".into(),
+    ];
+    let mut hardware = base.clone();
+    hardware.extend([
+        "-c:v".into(),
+        "h264_videotoolbox".into(),
+        "-b:v".into(),
+        "5M".into(),
+        output_path.display().to_string(),
+    ]);
+    let first = run_ffmpeg(&hardware)?;
+    if !first.status.success() {
+        let mut portable = base;
+        portable.extend([
+            "-c:v".into(),
+            "mpeg4".into(),
+            "-q:v".into(),
+            "4".into(),
+            output_path.display().to_string(),
+        ]);
+        let second = run_ffmpeg(&portable)?;
+        if !second.status.success() {
+            return Err(MediaError::Failed(
+                String::from_utf8_lossy(&second.stderr).trim().into(),
+            ));
+        }
+    }
+    Ok(output_path.display().to_string())
+}
+
+fn parse_number_after(line: &str, marker: &str) -> Option<f64> {
+    line.split(marker)
+        .nth(1)?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
+pub fn analyze(
+    source: &Path,
+    project_folder: &Path,
+    asset_id: Uuid,
+) -> Result<LocalAnalysis, MediaError> {
+    let analysis_dir = project_folder
+        .join(".open-editor/cache/analysis")
+        .join(asset_id.to_string());
+    std::fs::create_dir_all(&analysis_dir)
+        .map_err(|error| MediaError::Failed(error.to_string()))?;
+
+    let scene_pattern = analysis_dir.join("scene-%04d.jpg");
+    let scene_args = vec![
+        "-hide_banner".into(),
+        "-y".into(),
+        "-i".into(),
+        source.display().to_string(),
+        "-vf".into(),
+        "select=gt(scene\\,0.32),showinfo,scale=480:-2".into(),
+        "-fps_mode".into(),
+        "vfr".into(),
+        scene_pattern.display().to_string(),
+    ];
+    let scene_output = run_ffmpeg(&scene_args)?;
+    let scene_log = String::from_utf8_lossy(&scene_output.stderr);
+    let scene_times = scene_log
+        .lines()
+        .filter_map(|line| parse_number_after(line, "pts_time:"))
+        .map(seconds)
+        .collect::<Vec<_>>();
+
+    let silence_args = vec![
+        "-hide_banner".into(),
+        "-i".into(),
+        source.display().to_string(),
+        "-af".into(),
+        "silencedetect=noise=-35dB:d=0.35".into(),
+        "-f".into(),
+        "null".into(),
+        "-".into(),
+    ];
+    let silence_output = run_ffmpeg(&silence_args)?;
+    let mut open_start = None;
+    let mut silence_ranges = Vec::new();
+    for line in String::from_utf8_lossy(&silence_output.stderr).lines() {
+        if let Some(value) = parse_number_after(line, "silence_start:") {
+            open_start = Some(value);
+        }
+        if let (Some(start), Some(end)) = (open_start, parse_number_after(line, "silence_end:")) {
+            silence_ranges.push(SilenceRange {
+                start: seconds(start),
+                end: seconds(end),
+            });
+            open_start = None;
+        }
+    }
+    let mut keyframe_paths = std::fs::read_dir(&analysis_dir)
+        .map_err(|error| MediaError::Failed(error.to_string()))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "jpg"))
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>();
+    keyframe_paths.sort();
+    Ok(LocalAnalysis {
+        scene_times,
+        silence_ranges,
+        keyframe_paths,
     })
 }
 
@@ -314,6 +470,14 @@ mod tests {
         let inspection = inspect(&source, root.path()).unwrap();
         assert_eq!(inspection.kind, "video");
         assert_eq!(inspection.width, Some(320));
+        let asset_id = Uuid::new_v4();
+        let proxy = create_proxy(&source, root.path(), asset_id).unwrap();
+        assert!(Path::new(&proxy).metadata().unwrap().len() > 0);
+        let analysis = analyze(&source, root.path(), asset_id).unwrap();
+        assert!(analysis
+            .scene_times
+            .iter()
+            .all(|time| time.timescale == 600));
         let output = root.path().join("export.mp4");
         export(ExportRequest {
             output_path: output.display().to_string(),

@@ -51,6 +51,18 @@ export async function importMediaFiles(projectFolder: string): Promise<MediaInsp
   return invoke<MediaInspection[]>("inspect_media", { paths, projectFolder });
 }
 
+export async function relinkMediaFile(projectFolder: string, assetId: string): Promise<ProjectDocument | null> {
+  if (!isDesktop()) return null;
+  const selection = await open({
+    multiple: false,
+    directory: false,
+    filters: [{ name: "Media", extensions: ["mov", "mp4", "m4v", "webm", "jpg", "jpeg", "png", "heic", "wav", "mp3", "m4a", "aac"] }],
+  });
+  if (typeof selection !== "string") return null;
+  const [inspection] = await invoke<MediaInspection[]>("inspect_media", { paths: [selection], projectFolder });
+  return invoke<ProjectDocument>("relink_media", { folder: projectFolder, assetId, inspection });
+}
+
 export async function chooseExportPath(defaultName: string): Promise<string | null> {
   if (!isDesktop()) return null;
   return save({ defaultPath: `${defaultName}.mp4`, filters: [{ name: "MPEG-4 Video", extensions: ["mp4"] }] });
@@ -58,4 +70,12 @@ export async function chooseExportPath(defaultName: string): Promise<string | nu
 
 export async function exportVideo(request: ExportRequest): Promise<string> {
   return invoke<string>("export_video", { request });
+}
+
+export async function createMediaProxy(folder: string, assetId: string): Promise<ProjectDocument> {
+  return invoke<ProjectDocument>("create_media_proxy", { folder, assetId });
+}
+
+export async function analyzeMediaAsset(folder: string, assetId: string): Promise<ProjectDocument> {
+  return invoke<ProjectDocument>("analyze_media_asset", { folder, assetId });
 }

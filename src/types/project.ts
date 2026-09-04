@@ -24,6 +24,17 @@ export interface MediaAsset {
   waveformPath?: string;
   codec?: string;
   hasAudio?: boolean;
+  proxyPath?: string;
+}
+
+export interface AnalysisArtifact {
+  id: Id;
+  assetId: Id;
+  kind: "scenes" | "silence" | "keyframes" | "transcript";
+  status: "ready" | "failed";
+  createdAt: string;
+  paths: string[];
+  data: unknown;
 }
 
 export interface Transform {
@@ -93,6 +104,7 @@ export interface ProjectDocument {
   activeSequenceId: Id;
   conversations: ConversationRecord[];
   hostedContextConsent: boolean;
+  analysisArtifacts: AnalysisArtifact[];
 }
 
 export type CommandSource = "manual" | "codex" | "ollama";
@@ -144,6 +156,7 @@ export interface MediaInspection {
   height?: number;
   codec?: string;
   hasAudio: boolean;
+  bookmark?: string;
   thumbnailPath?: string;
   waveformPath?: string;
 }

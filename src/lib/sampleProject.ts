@@ -11,6 +11,7 @@ export const sampleProject: ProjectDocument = {
   createdAt: now,
   updatedAt: now,
   hostedContextConsent: false,
+  analysisArtifacts: [],
   activeSequenceId: "sequence-main",
   media: [
     { id: "asset-1", name: "Beach walk.mov", kind: "video", path: "media/beach.mov", duration: seconds(7.2), width: 3840, height: 2160, status: "ready", color: "#d98f6f" },

@@ -134,6 +134,22 @@ pub struct MediaAsset {
     pub codec: Option<String>,
     #[serde(default)]
     pub has_audio: Option<bool>,
+    #[serde(default)]
+    pub proxy_path: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalysisArtifact {
+    pub id: Uuid,
+    pub asset_id: Uuid,
+    pub kind: String,
+    pub status: String,
+    pub created_at: String,
+    #[serde(default)]
+    pub paths: Vec<String>,
+    #[serde(default)]
+    pub data: serde_json::Value,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -161,6 +177,8 @@ pub struct ProjectDocument {
     pub active_sequence_id: Uuid,
     pub conversations: Vec<ConversationRecord>,
     pub hosted_context_consent: bool,
+    #[serde(default)]
+    pub analysis_artifacts: Vec<AnalysisArtifact>,
 }
 
 impl ProjectDocument {
@@ -202,6 +220,7 @@ impl ProjectDocument {
             active_sequence_id: sequence_id,
             conversations: vec![],
             hosted_context_consent: false,
+            analysis_artifacts: vec![],
         }
     }
 
@@ -237,6 +256,21 @@ impl ProjectDocument {
                 return Err(ProjectError::Invalid(format!(
                     "media {} is invalid",
                     asset.id
+                )));
+            }
+        }
+        let mut artifact_ids = HashSet::new();
+        for artifact in &self.analysis_artifacts {
+            if !artifact_ids.insert(artifact.id)
+                || !media_ids.contains(&artifact.asset_id)
+                || !matches!(
+                    artifact.kind.as_str(),
+                    "scenes" | "silence" | "keyframes" | "transcript"
+                )
+            {
+                return Err(ProjectError::Invalid(format!(
+                    "analysis artifact {} is invalid",
+                    artifact.id
                 )));
             }
         }
@@ -332,11 +366,17 @@ pub fn load(folder: &Path) -> Result<ProjectDocument, ProjectError> {
     project.validate()?;
     for asset in &mut project.media {
         let media_path = Path::new(&asset.path);
-        let resolved = if media_path.is_absolute() {
-            media_path.to_path_buf()
-        } else {
-            folder.join(media_path)
-        };
+        let resolved = asset
+            .bookmark
+            .as_deref()
+            .and_then(crate::native::resolve_security_bookmark)
+            .unwrap_or_else(|| {
+                if media_path.is_absolute() {
+                    media_path.to_path_buf()
+                } else {
+                    folder.join(media_path)
+                }
+            });
         if !resolved.is_file() {
             asset.status = "missing".into();
         }

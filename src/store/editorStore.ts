@@ -20,6 +20,7 @@ interface EditorState {
   recentProjects: RecentProject[];
   undoStack: HistoryEntry[]; redoStack: HistoryEntry[];
   replaceProject: (project: ProjectDocument, folder: string) => void; setProjectError: (message?: string) => void;
+  updateProject: (project: ProjectDocument) => void;
   selectClip: (id?: string) => void; selectAsset: (id?: string) => void; setPlayhead: (value: RationalTime) => void;
   setPlaying: (playing: boolean) => void; togglePlayback: () => void; toggleProjects: () => void; toggleAgent: () => void; toggleTimeline: () => void;
   setMediaTab: (tab: EditorState["mediaTab"]) => void; dispatch: (command: EditorCommand, label?: string) => Promise<boolean>;
@@ -55,6 +56,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     window.localStorage.setItem("open-editor.recents.v1", JSON.stringify(recents));
     set({ project, projectFolder, recentProjects: recents, projectError: undefined, selectedClipId: undefined, selectedAssetId: project.media[0]?.id, playhead: seconds(0), isPlaying: false, undoStack: [], redoStack: [] });
   },
+  updateProject: (project) => set({ project, projectError: undefined }),
   setProjectError: (projectError) => set({ projectError }), selectClip: (selectedClipId) => set({ selectedClipId }), selectAsset: (selectedAssetId) => set({ selectedAssetId }),
   setPlayhead: (playhead) => set({ playhead }), setPlaying: (isPlaying) => set({ isPlaying }), togglePlayback: () => set((state) => ({ isPlaying: !state.isPlaying })),
   toggleProjects: () => set((state) => { const projectsOpen = !state.projectsOpen; window.localStorage.setItem("open-editor.projects-open.v1", String(projectsOpen)); return { projectsOpen }; }),

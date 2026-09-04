@@ -99,6 +99,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 
 .editor-grid { min-height: 0; display: grid; grid-template-columns: 250px minmax(430px, 1fr); grid-template-rows: minmax(300px, 56%) minmax(230px, 44%); gap: 1px; background: var(--line); }
 .media-library { grid-column: 1; grid-row: 1; display: flex; flex-direction: column; padding-bottom: 10px; }
+.media-preparation-actions { display: flex; gap: 6px; padding: 0 8px 7px; }
+.media-preparation-actions button { flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 26px; border: 1px solid var(--border); border-radius: 6px; background: #111317; color: var(--muted); font-size: 10px; }
+.media-preparation-actions button:hover:not(:disabled) { color: var(--text); background: #17191e; }
+.media-preparation-actions button:disabled { opacity: .55; }
 .viewer { grid-column: 2; grid-row: 1; display: grid; grid-template-rows: var(--section-header-height) 1fr 45px; }
 .timeline { grid-column: 1 / -1; grid-row: 2; display: grid; grid-template-rows: 41px 1fr; }
 .app-shell.timeline-closed .editor-grid { grid-template-rows: minmax(0, 1fr); }

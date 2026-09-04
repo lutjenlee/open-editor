@@ -7,7 +7,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { formatTimecode, seconds, toSeconds } from "./lib/time";
-import { chooseExportPath, createProjectFolder, exportVideo, importMediaFiles, isDesktop, openProjectAtPath, openProjectFolder, saveProjectFolder } from "./lib/desktop";
+import { analyzeMediaAsset, chooseExportPath, createMediaProxy, createProjectFolder, exportVideo, importMediaFiles, isDesktop, openProjectAtPath, openProjectFolder, relinkMediaFile, saveProjectFolder } from "./lib/desktop";
 import { useEditorStore } from "./store/editorStore";
 import type { MediaAsset, Track } from "./types/project";
 
@@ -126,7 +126,10 @@ function MediaLibrary() {
   const projectFolder = useEditorStore((s) => s.projectFolder);
   const addMedia = useEditorStore((s) => s.addMedia);
   const setError = useEditorStore((s) => s.setProjectError);
+  const selectedAssetId = useEditorStore((s) => s.selectedAssetId);
+  const updateProject = useEditorStore((s) => s.updateProject);
   const [importing, setImporting] = useState(false);
+  const [preparing, setPreparing] = useState<"proxy" | "analysis">();
   const [query, setQuery] = useState("");
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const filtered = project.media.filter((asset) =>
@@ -142,12 +145,39 @@ function MediaLibrary() {
     } catch (error) { setError(error instanceof Error ? error.message : String(error)); }
     finally { setImporting(false); }
   };
+  const prepareSelected = async (kind: "proxy" | "analysis") => {
+    if (!projectFolder || !selectedAssetId) return;
+    setPreparing(kind);
+    try {
+      const next = kind === "proxy"
+        ? await createMediaProxy(projectFolder, selectedAssetId)
+        : await analyzeMediaAsset(projectFolder, selectedAssetId);
+      updateProject(next);
+    } catch (error) { setError(error instanceof Error ? error.message : String(error)); }
+    finally { setPreparing(undefined); }
+  };
+  const relinkSelected = async () => {
+    if (!projectFolder || !selectedAssetId) return;
+    setPreparing("analysis");
+    try {
+      const next = await relinkMediaFile(projectFolder, selectedAssetId);
+      if (next) updateProject(next);
+    } catch (error) { setError(error instanceof Error ? error.message : String(error)); }
+    finally { setPreparing(undefined); }
+  };
+  const selectedAsset = project.media.find((asset) => asset.id === selectedAssetId);
   return <section className="media-library panel">
     <div className="panel-title"><div><Library size={15} /><strong>Media</strong></div><IconButton label="Import media" onClick={() => void importFiles()} disabled={importing}><Upload size={15} /></IconButton></div>
     <div className="media-tabs">
       {(["all", "video", "audio", "image"] as const).map((item) => <button key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>{item}</button>)}
     </div>
     <div className="media-search"><Search size={13} /><input aria-label="Search media" placeholder="Search media" value={query} onChange={(event) => setQuery(event.target.value)} /></div>
+    {selectedAssetId && <div className="media-preparation-actions">
+      {selectedAsset?.status === "missing" ? <button onClick={() => void relinkSelected()} disabled={Boolean(preparing)}><Files size={13} />Relink</button> : <>
+        <button onClick={() => void prepareSelected("analysis")} disabled={Boolean(preparing)}><Gauge size={13} />{preparing === "analysis" ? "Analyzing…" : "Analyze"}</button>
+        {selectedAsset?.kind === "video" && <button onClick={() => void prepareSelected("proxy")} disabled={Boolean(preparing)}><Film size={13} />{preparing === "proxy" ? "Creating…" : "Make proxy"}</button>}
+      </>}
+    </div>}
     <div className="media-grid">{filtered.map((asset) => <MediaCard key={asset.id} asset={asset} />)}{filtered.length === 0 && <p className="media-empty">No matching media</p>}</div>
     <button className="import-drop" onClick={() => void importFiles()} disabled={importing}><Plus size={14} /> {importing ? "Inspecting…" : "Import media"}</button>
   </section>;
@@ -172,11 +202,11 @@ function Viewer() {
   return <section className="viewer panel">
     <div className="viewer-toolbar"><span>{sequence?.name ?? "Sequence"}</span><div><button>Fit <ChevronDown size={12} /></button><IconButton label="Viewer settings"><Settings2 size={14} /></IconButton></div></div>
     <div className="viewer-stage">
-      {asset?.kind === "video" && isDesktop() ? <video ref={videoRef} className="native-video" src={convertFileSrc(asset.path)} onEnded={() => setPlaying(false)} onTimeUpdate={(event) => { if (!selectedClip) return; const position = toSeconds(selectedClip.timelineStart) + Math.max(0, event.currentTarget.currentTime - toSeconds(selectedClip.sourceIn)) / selectedClip.playbackRate; setPlayhead(seconds(position)); }} /> : asset?.kind === "image" && isDesktop() ? <img className="native-video" src={convertFileSrc(asset.path)} alt={asset.name} /> : <div className="portrait-video">
+      {asset?.kind === "video" && isDesktop() ? <video ref={videoRef} className="native-video" src={convertFileSrc(asset.proxyPath ?? asset.path)} onEnded={() => setPlaying(false)} onTimeUpdate={(event) => { if (!selectedClip) return; const position = toSeconds(selectedClip.timelineStart) + Math.max(0, event.currentTarget.currentTime - toSeconds(selectedClip.sourceIn)) / selectedClip.playbackRate; setPlayhead(seconds(position)); }} /> : asset?.kind === "image" && isDesktop() ? <img className="native-video" src={convertFileSrc(asset.path)} alt={asset.name} /> : <div className="portrait-video">
         <div className="sun" /><div className="horizon" /><div className="subject"><span /></div>
         <div className="caption-preview">Make every second count.</div>
       </div>}
-      <span className="preview-badge">{asset ? `${asset.codec ?? asset.kind} · ${asset.width ?? "—"}×${asset.height ?? "—"}` : "NO MEDIA"}</span>
+      <span className="preview-badge">{asset ? `${asset.proxyPath ? "PROXY" : asset.codec ?? asset.kind} · ${asset.width ?? "—"}×${asset.height ?? "—"}` : "NO MEDIA"}</span>
     </div>
     <div className="transport">
       <IconButton label="Previous frame (preview not connected)" disabled><SkipBack size={15} /></IconButton>

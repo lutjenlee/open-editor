@@ -397,6 +397,7 @@ mod tests {
                 waveform_path: None,
                 codec: Some("h264".into()),
                 has_audio: Some(false),
+                proxy_path: None,
             };
             let envelope = CommandEnvelope {
                 command_id: Uuid::new_v4(),
@@ -432,6 +433,7 @@ mod tests {
             waveform_path: None,
             codec: None,
             has_audio: None,
+            proxy_path: None,
         };
         let envelope = CommandEnvelope {
             command_id: Uuid::new_v4(),
