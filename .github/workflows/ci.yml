@@ -39,7 +39,8 @@ jobs:
       - name: Swift tests
         run: swift test --package-path native/OpenEditorMedia
       - name: Dependency audit
-        run: npm audit --audit-level=high
+        timeout-minutes: 3
+        run: npm audit --audit-level=high --fetch-retries=1 --fetch-timeout=30000 --fetch-retry-mintimeout=5000 --fetch-retry-maxtimeout=10000
 
   secret-scan:
     runs-on: ubuntu-latest
