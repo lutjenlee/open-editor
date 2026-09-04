@@ -141,3 +141,22 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# macOS and editors
+.DS_Store
+.idea/
+.vscode/
+
+# Rust, Swift, and Tauri build products
+target/
+src-tauri/target/
+native/**/.build/
+
+# Local project data and generated media caches
+.open-editor/
+open-editor.project.json.bak
+
+# Local signing and secret material
+*.p12
+*.provisionprofile
+*.mobileprovision
