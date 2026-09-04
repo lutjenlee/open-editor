@@ -42,6 +42,9 @@ export function applyEditorCommand(current: ProjectDocument, envelope: CommandEn
   const project = copy(current);
   const affected: string[] = [];
   const command: EditorCommand = envelope.payload;
+  if (envelope.source !== "manual" && (command.type === "addMedia" || command.type === "removeMedia")) {
+    throw new CommandError("Providers cannot change the project's approved media scope.");
+  }
 
   if (command.type === "addMedia") {
     if (project.media.some((item) => item.id === command.asset.id)) throw new CommandError("Media identifier already exists.");
@@ -50,6 +53,39 @@ export function applyEditorCommand(current: ProjectDocument, envelope: CommandEn
     const used = project.sequences.some((sequence) => sequence.tracks.some((track) => track.clips.some((clip) => clip.assetId === command.assetId)));
     if (used) throw new CommandError("Remove clips using this media before removing it from the library.");
     project.media = project.media.filter((item) => item.id !== command.assetId); affected.push(command.assetId);
+  } else if (command.type === "addCaption") {
+    const sequence = activeSequence(project);
+    const track = sequence.tracks.find((item) => item.id === command.trackId && item.kind === "caption");
+    if (!track || track.locked) throw new CommandError("The caption track is missing or locked.");
+    if (!command.text.trim() || toSeconds(command.end) <= toSeconds(command.start)) throw new CommandError("Caption text and timing are invalid.");
+    const id = crypto.randomUUID();
+    sequence.captions.push({ id, trackId: track.id, start: command.start, end: command.end, text: command.text.trim(), style: { fontSize: 48, color: "#ffffff", background: "#000000", position: "bottom" } });
+    affected.push(id);
+  } else if (command.type === "editCaption" || command.type === "styleCaption" || command.type === "removeCaption") {
+    const sequence = activeSequence(project);
+    const caption = sequence.captions.find((item) => item.id === command.captionId);
+    if (!caption) throw new CommandError("The caption does not exist.");
+    if (command.type === "removeCaption") sequence.captions = sequence.captions.filter((item) => item.id !== command.captionId);
+    else if (command.type === "editCaption") {
+      if (!command.text.trim()) throw new CommandError("Caption text cannot be empty.");
+      caption.text = command.text.trim();
+    } else {
+      if (command.style.fontSize <= 0) throw new CommandError("Caption size must be positive.");
+      caption.style = command.style;
+    }
+    affected.push(command.captionId);
+  } else if (command.type === "addTransition") {
+    const sequence = activeSequence(project);
+    const clipIds = new Set(sequence.tracks.flatMap((track) => track.clips.map((clip) => clip.id)));
+    if (!clipIds.has(command.fromClipId) || !clipIds.has(command.toClipId) || command.fromClipId === command.toClipId || toSeconds(command.duration) <= 0) throw new CommandError("Transition clips or duration are invalid.");
+    const id = crypto.randomUUID();
+    sequence.transitions.push({ id, fromClipId: command.fromClipId, toClipId: command.toClipId, kind: command.kind, duration: command.duration });
+    affected.push(id);
+  } else if (command.type === "removeTransition") {
+    const sequence = activeSequence(project);
+    if (!sequence.transitions.some((item) => item.id === command.transitionId)) throw new CommandError("The transition does not exist.");
+    sequence.transitions = sequence.transitions.filter((item) => item.id !== command.transitionId);
+    affected.push(command.transitionId);
   } else {
     const track = findTrack(project, command.trackId);
     if (command.type === "addClip") {
@@ -62,7 +98,9 @@ export function applyEditorCommand(current: ProjectDocument, envelope: CommandEn
     } else {
       const clip = findClip(track, command.clipId);
       if (command.type === "removeClip") {
-        track.clips = track.clips.filter((item) => item.id !== clip.id); affected.push(clip.id);
+        track.clips = track.clips.filter((item) => item.id !== clip.id);
+        activeSequence(project).transitions = activeSequence(project).transitions.filter((item) => item.fromClipId !== clip.id && item.toClipId !== clip.id);
+        affected.push(clip.id);
       } else if (command.type === "moveClip") {
         if (command.timelineStart.value < 0) throw new CommandError("A clip cannot start before the timeline.");
         clip.timelineStart = command.timelineStart; affected.push(clip.id);
@@ -93,6 +131,21 @@ export function applyEditorCommand(current: ProjectDocument, envelope: CommandEn
       } else if (command.type === "setVolume") {
         if (command.volume < 0 || command.volume > 4) throw new CommandError("Volume must be between 0 and 4.");
         clip.audio.volume = command.volume; affected.push(clip.id);
+      } else if (command.type === "fadeAudio") {
+        if (toSeconds(command.fadeIn) < 0 || toSeconds(command.fadeOut) < 0) throw new CommandError("Audio fades cannot be negative.");
+        const duration = (toSeconds(clip.sourceOut) - toSeconds(clip.sourceIn)) / clip.playbackRate;
+        if (toSeconds(command.fadeIn) + toSeconds(command.fadeOut) > duration) throw new CommandError("Audio fades cannot exceed the clip duration.");
+        clip.audio.fadeIn = command.fadeIn; clip.audio.fadeOut = command.fadeOut; affected.push(clip.id);
+      } else if (command.type === "duckAudio") {
+        clip.audio.ducking = command.enabled; affected.push(clip.id);
+      } else if (command.type === "replaceClip") {
+        const asset = project.media.find((item) => item.id === command.assetId);
+        if (!asset) throw new CommandError("Replacement media does not exist.");
+        const oldAsset = project.media.find((item) => item.id === clip.assetId);
+        if (!oldAsset || asset.kind !== oldAsset.kind) throw new CommandError("Replacement media must have the same type.");
+        clip.assetId = asset.id; clip.name = asset.name.replace(/\.[^.]+$/, "");
+        clip.sourceIn = seconds(0); clip.sourceOut = seconds(Math.max(toSeconds(asset.duration), 1 / 30));
+        affected.push(clip.id, asset.id);
       }
     }
   }

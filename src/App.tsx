@@ -220,7 +220,7 @@ function Viewer() {
   </section>;
 }
 
-function TrackRow({ track, pixelsPerSecond }: { track: Track; pixelsPerSecond: number }) {
+function TrackRow({ track, pixelsPerSecond, sequence }: { track: Track; pixelsPerSecond: number; sequence: import("./types/project").Sequence }) {
   const selected = useEditorStore((s) => s.selectedClipId);
   const select = useEditorStore((s) => s.selectClip);
   return <div className="track-row">
@@ -233,8 +233,7 @@ function TrackRow({ track, pixelsPerSecond }: { track: Track; pixelsPerSecond: n
           <span className="clip-filmstrip" /><span>{clip.name}</span><small>{duration.toFixed(1)}s</small>
         </button>;
       })}
-      {track.kind === "caption" && <><div className="caption-block" style={{ left: 48, width: 155 }}>Make every second count</div><div className="caption-block" style={{ left: 225, width: 190 }}>Built for the way you move</div></>}
-      {track.kind === "audio" && <div className="audio-block"><span>Daylight.mp3</span><div className="waveform">{Array.from({ length: 72 }).map((_, index) => <i key={index} style={{ height: `${6 + ((index * 17) % 20)}px` }} />)}</div></div>}
+      {track.kind === "caption" && sequence.captions.filter((caption) => caption.trackId === track.id).map((caption) => <div key={caption.id} className="caption-block" style={{ left: toSeconds(caption.start) * pixelsPerSecond, width: Math.max(52, (toSeconds(caption.end) - toSeconds(caption.start)) * pixelsPerSecond) }}>{caption.text}</div>)}
     </div>
   </div>;
 }
@@ -247,20 +246,35 @@ function Timeline() {
   const move = useEditorStore((s) => s.moveSelected);
   const undo = useEditorStore((s) => s.undo);
   const redo = useEditorStore((s) => s.redo);
+  const duplicate = useEditorStore((s) => s.duplicateSelected);
+  const dispatch = useEditorStore((s) => s.dispatch);
+  const selectedClipId = useEditorStore((s) => s.selectedClipId);
   const canUndo = useEditorStore((s) => s.undoStack.length > 0);
   const canRedo = useEditorStore((s) => s.redoStack.length > 0);
   const sequence = project.sequences.find((item) => item.id === project.activeSequenceId)!;
   const px = 42;
+  const selected = sequence.tracks.flatMap((track) => track.clips.map((clip) => ({ track, clip }))).find((item) => item.clip.id === selectedClipId);
+  const addCaption = () => {
+    const track = sequence.tracks.find((item) => item.kind === "caption");
+    if (track) void dispatch({ type: "addCaption", trackId: track.id, start: playhead, end: seconds(toSeconds(playhead) + 2), text: "New caption" }, "Add caption");
+  };
   return <section className="timeline panel">
     <div className="timeline-toolbar">
       <div><strong>Timeline</strong><span className="sequence-pill">9:16 · 1080 × 1920</span></div>
-      <div className="timeline-tools"><IconButton label="Undo" onClick={undo} disabled={!canUndo}><Undo2 size={14} /></IconButton><IconButton label="Redo" onClick={redo} disabled={!canRedo}><Redo2 size={14} /></IconButton><span className="toolbar-divider" /><IconButton label="Move left" onClick={() => move(seconds(-0.25))}><ChevronLeft size={14} /></IconButton><IconButton label="Split clip" onClick={split}><Scissors size={14} /></IconButton><IconButton label="Move right" onClick={() => move(seconds(0.25))}><ChevronRight size={14} /></IconButton><IconButton label="Delete clip" onClick={remove}><Trash2 size={14} /></IconButton></div>
+      <div className="timeline-tools"><IconButton label="Undo" onClick={undo} disabled={!canUndo}><Undo2 size={14} /></IconButton><IconButton label="Redo" onClick={redo} disabled={!canRedo}><Redo2 size={14} /></IconButton><span className="toolbar-divider" /><IconButton label="Add caption" onClick={addCaption}><MessageSquarePlus size={14} /></IconButton><IconButton label="Move left" onClick={() => move(seconds(-0.25))} disabled={!selected}><ChevronLeft size={14} /></IconButton><IconButton label="Split clip" onClick={split} disabled={!selected}><Scissors size={14} /></IconButton><IconButton label="Duplicate clip" onClick={duplicate} disabled={!selected}><Files size={14} /></IconButton><IconButton label="Move right" onClick={() => move(seconds(0.25))} disabled={!selected}><ChevronRight size={14} /></IconButton><IconButton label="Delete clip" onClick={remove} disabled={!selected}><Trash2 size={14} /></IconButton></div>
     </div>
+    {selected && <div className="clip-inspector" aria-label="Selected clip controls">
+      <span>{selected.clip.name}</span>
+      <label>Speed<select value={selected.clip.playbackRate} onChange={(event) => void dispatch({ type: "changeSpeed", trackId: selected.track.id, clipId: selected.clip.id, playbackRate: Number(event.target.value) }, "Change speed")}><option value="0.5">0.5×</option><option value="1">1×</option><option value="1.5">1.5×</option><option value="2">2×</option></select></label>
+      <label>Opacity<input type="range" min="0" max="1" step="0.05" value={selected.clip.transform.opacity} onChange={(event) => void dispatch({ type: "setOpacity", trackId: selected.track.id, clipId: selected.clip.id, opacity: Number(event.target.value) }, "Set opacity")} /></label>
+      <label>Volume<input type="range" min="0" max="2" step="0.05" value={selected.clip.audio.volume} onChange={(event) => void dispatch({ type: "setVolume", trackId: selected.track.id, clipId: selected.clip.id, volume: Number(event.target.value) }, "Set volume")} /></label>
+      <label className="check-control"><input type="checkbox" checked={selected.clip.audio.ducking} onChange={(event) => void dispatch({ type: "duckAudio", trackId: selected.track.id, clipId: selected.clip.id, enabled: event.target.checked }, "Toggle ducking")} />Duck</label>
+    </div>}
     <div className="timeline-scroll">
       <div className="ruler"><div className="ruler-spacer" />{Array.from({ length: 21 }).map((_, index) => <span key={index} style={{ left: 112 + index * px }}>{index % 5 === 0 ? `00:${String(index).padStart(2, "0")}` : "·"}</span>)}</div>
       <div className="tracks-wrap">
         <div className="playhead-line" style={{ left: 112 + toSeconds(playhead) * px }}><span /></div>
-        {sequence.tracks.map((track) => <TrackRow key={track.id} track={track} pixelsPerSecond={px} />)}
+        {sequence.tracks.map((track) => <TrackRow key={track.id} track={track} pixelsPerSecond={px} sequence={sequence} />)}
       </div>
     </div>
   </section>;

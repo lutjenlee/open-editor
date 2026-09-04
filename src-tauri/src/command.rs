@@ -2,7 +2,10 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::project::{Clip, MediaAsset, ProjectDocument, ProjectError, RationalTime, Track};
+use crate::project::{
+    CaptionSegment, CaptionStyle, Clip, MediaAsset, ProjectDocument, ProjectError, RationalTime,
+    Sequence, Track, Transition,
+};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -74,6 +77,53 @@ pub enum EditorCommand {
         clip_id: Uuid,
         volume: f64,
     },
+    FadeAudio {
+        track_id: Uuid,
+        clip_id: Uuid,
+        fade_in: RationalTime,
+        fade_out: RationalTime,
+    },
+    DuckAudio {
+        track_id: Uuid,
+        clip_id: Uuid,
+        enabled: bool,
+    },
+    ReplaceClip {
+        track_id: Uuid,
+        clip_id: Uuid,
+        asset_id: Uuid,
+    },
+    CropClip {
+        track_id: Uuid,
+        clip_id: Uuid,
+        transform: crate::project::Transform,
+    },
+    AddCaption {
+        track_id: Uuid,
+        start: RationalTime,
+        end: RationalTime,
+        text: String,
+    },
+    EditCaption {
+        caption_id: Uuid,
+        text: String,
+    },
+    StyleCaption {
+        caption_id: Uuid,
+        style: CaptionStyle,
+    },
+    RemoveCaption {
+        caption_id: Uuid,
+    },
+    AddTransition {
+        from_clip_id: Uuid,
+        to_clip_id: Uuid,
+        kind: String,
+        duration: RationalTime,
+    },
+    RemoveTransition {
+        transition_id: Uuid,
+    },
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -82,7 +132,16 @@ pub struct CommandResult {
     pub new_project_revision: u64,
     pub affected_entity_ids: Vec<Uuid>,
     pub project: ProjectDocument,
+    pub forward_patch: ProjectPatch,
+    pub inverse_patch: ProjectPatch,
     pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectPatch {
+    pub before: ProjectDocument,
+    pub after: ProjectDocument,
 }
 
 fn time_seconds(time: RationalTime) -> f64 {
@@ -110,6 +169,14 @@ fn active_track(project: &mut ProjectDocument, track_id: Uuid) -> Result<&mut Tr
         return Err(ProjectError::Invalid("track is locked".into()));
     }
     Ok(track)
+}
+
+fn active_sequence(project: &mut ProjectDocument) -> Result<&mut Sequence, ProjectError> {
+    project
+        .sequences
+        .iter_mut()
+        .find(|item| item.id == project.active_sequence_id)
+        .ok_or_else(|| ProjectError::Invalid("active sequence does not exist".into()))
 }
 
 fn clip(track: &mut Track, clip_id: Uuid) -> Result<&mut Clip, ProjectError> {
@@ -148,6 +215,7 @@ pub fn dispatch(
             "providers cannot change the project's approved media scope".into(),
         ));
     }
+    let before = project.clone();
     let mut affected = Vec::new();
     match &envelope.payload {
         EditorCommand::AddMedia { asset } => {
@@ -218,6 +286,11 @@ pub fn dispatch(
             active_track(&mut project, *track_id)?
                 .clips
                 .retain(|item| item.id != *clip_id);
+            active_sequence(&mut project)?
+                .transitions
+                .retain(|transition| {
+                    transition.from_clip_id != *clip_id && transition.to_clip_id != *clip_id
+                });
             affected.push(*clip_id);
         }
         EditorCommand::MoveClip {
@@ -343,14 +416,228 @@ pub fn dispatch(
                 .volume = *volume;
             affected.push(*clip_id);
         }
+        EditorCommand::FadeAudio {
+            track_id,
+            clip_id,
+            fade_in,
+            fade_out,
+        } => {
+            if fade_in.value < 0 || fade_out.value < 0 {
+                return Err(ProjectError::Invalid(
+                    "audio fades cannot be negative".into(),
+                ));
+            }
+            let item = clip(active_track(&mut project, *track_id)?, *clip_id)?;
+            let duration =
+                (time_seconds(item.source_out) - time_seconds(item.source_in)) / item.playback_rate;
+            if time_seconds(*fade_in) + time_seconds(*fade_out) > duration {
+                return Err(ProjectError::Invalid(
+                    "audio fades cannot exceed the clip duration".into(),
+                ));
+            }
+            item.audio.fade_in = *fade_in;
+            item.audio.fade_out = *fade_out;
+            affected.push(*clip_id);
+        }
+        EditorCommand::DuckAudio {
+            track_id,
+            clip_id,
+            enabled,
+        } => {
+            clip(active_track(&mut project, *track_id)?, *clip_id)?
+                .audio
+                .ducking = *enabled;
+            affected.push(*clip_id);
+        }
+        EditorCommand::ReplaceClip {
+            track_id,
+            clip_id,
+            asset_id,
+        } => {
+            let replacement = project
+                .media
+                .iter()
+                .find(|asset| asset.id == *asset_id)
+                .cloned()
+                .ok_or_else(|| ProjectError::Invalid("replacement media does not exist".into()))?;
+            let current_asset_id = active_track(&mut project, *track_id)?
+                .clips
+                .iter()
+                .find(|item| item.id == *clip_id)
+                .map(|item| item.asset_id)
+                .ok_or_else(|| ProjectError::Invalid("clip does not exist".into()))?;
+            let current_kind = project
+                .media
+                .iter()
+                .find(|asset| asset.id == current_asset_id)
+                .map(|asset| asset.kind.as_str());
+            if current_kind != Some(replacement.kind.as_str()) {
+                return Err(ProjectError::Invalid(
+                    "replacement media must have the same type".into(),
+                ));
+            }
+            let item = clip(active_track(&mut project, *track_id)?, *clip_id)?;
+            item.asset_id = replacement.id;
+            item.name = replacement
+                .name
+                .rsplit_once('.')
+                .map(|(stem, _)| stem)
+                .unwrap_or(&replacement.name)
+                .into();
+            item.source_in = from_seconds(0.0);
+            item.source_out = if replacement.duration.value > 0 {
+                replacement.duration
+            } else {
+                from_seconds(5.0)
+            };
+            affected.extend([*clip_id, *asset_id]);
+        }
+        EditorCommand::CropClip {
+            track_id,
+            clip_id,
+            transform,
+        } => {
+            if transform.scale <= 0.0 || !(0.0..=1.0).contains(&transform.opacity) {
+                return Err(ProjectError::Invalid("clip transform is invalid".into()));
+            }
+            clip(active_track(&mut project, *track_id)?, *clip_id)?.transform = transform.clone();
+            affected.push(*clip_id);
+        }
+        EditorCommand::AddCaption {
+            track_id,
+            start,
+            end,
+            text,
+        } => {
+            if text.trim().is_empty() || time_seconds(*end) <= time_seconds(*start) {
+                return Err(ProjectError::Invalid(
+                    "caption text or timing is invalid".into(),
+                ));
+            }
+            let track = active_track(&mut project, *track_id)?;
+            if track.kind != "caption" {
+                return Err(ProjectError::Invalid(
+                    "captions require a caption track".into(),
+                ));
+            }
+            let id = Uuid::new_v4();
+            active_sequence(&mut project)?
+                .captions
+                .push(CaptionSegment {
+                    id,
+                    track_id: *track_id,
+                    start: *start,
+                    end: *end,
+                    text: text.trim().into(),
+                    style: CaptionStyle {
+                        font_size: 48.0,
+                        color: "#ffffff".into(),
+                        background: "#000000".into(),
+                        position: "bottom".into(),
+                    },
+                });
+            affected.push(id);
+        }
+        EditorCommand::EditCaption { caption_id, text } => {
+            if text.trim().is_empty() {
+                return Err(ProjectError::Invalid("caption text cannot be empty".into()));
+            }
+            let caption = active_sequence(&mut project)?
+                .captions
+                .iter_mut()
+                .find(|caption| caption.id == *caption_id)
+                .ok_or_else(|| ProjectError::Invalid("caption does not exist".into()))?;
+            caption.text = text.trim().into();
+            affected.push(*caption_id);
+        }
+        EditorCommand::StyleCaption { caption_id, style } => {
+            if style.font_size <= 0.0
+                || !matches!(style.position.as_str(), "top" | "center" | "bottom")
+            {
+                return Err(ProjectError::Invalid("caption style is invalid".into()));
+            }
+            let caption = active_sequence(&mut project)?
+                .captions
+                .iter_mut()
+                .find(|caption| caption.id == *caption_id)
+                .ok_or_else(|| ProjectError::Invalid("caption does not exist".into()))?;
+            caption.style = style.clone();
+            affected.push(*caption_id);
+        }
+        EditorCommand::RemoveCaption { caption_id } => {
+            let sequence = active_sequence(&mut project)?;
+            if !sequence
+                .captions
+                .iter()
+                .any(|caption| caption.id == *caption_id)
+            {
+                return Err(ProjectError::Invalid("caption does not exist".into()));
+            }
+            sequence
+                .captions
+                .retain(|caption| caption.id != *caption_id);
+            affected.push(*caption_id);
+        }
+        EditorCommand::AddTransition {
+            from_clip_id,
+            to_clip_id,
+            kind,
+            duration,
+        } => {
+            if !matches!(kind.as_str(), "cut" | "fade" | "crossDissolve") || duration.value <= 0 {
+                return Err(ProjectError::Invalid("transition is invalid".into()));
+            }
+            let sequence = active_sequence(&mut project)?;
+            let has_clip = |id: Uuid| {
+                sequence
+                    .tracks
+                    .iter()
+                    .any(|track| track.clips.iter().any(|clip| clip.id == id))
+            };
+            if from_clip_id == to_clip_id || !has_clip(*from_clip_id) || !has_clip(*to_clip_id) {
+                return Err(ProjectError::Invalid("transition clips are invalid".into()));
+            }
+            let id = Uuid::new_v4();
+            sequence.transitions.push(Transition {
+                id,
+                from_clip_id: *from_clip_id,
+                to_clip_id: *to_clip_id,
+                kind: kind.clone(),
+                duration: *duration,
+            });
+            affected.push(id);
+        }
+        EditorCommand::RemoveTransition { transition_id } => {
+            let sequence = active_sequence(&mut project)?;
+            if !sequence
+                .transitions
+                .iter()
+                .any(|transition| transition.id == *transition_id)
+            {
+                return Err(ProjectError::Invalid("transition does not exist".into()));
+            }
+            sequence
+                .transitions
+                .retain(|transition| transition.id != *transition_id);
+            affected.push(*transition_id);
+        }
     }
     project.revision += 1;
     project.updated_at = Utc::now().to_rfc3339();
     project.validate()?;
+    let after = project.clone();
     Ok(CommandResult {
         new_project_revision: project.revision,
         affected_entity_ids: affected,
         project,
+        forward_patch: ProjectPatch {
+            before: before.clone(),
+            after: after.clone(),
+        },
+        inverse_patch: ProjectPatch {
+            before: after,
+            after: before,
+        },
         warnings: vec![],
     })
 }
@@ -459,5 +746,84 @@ mod tests {
         });
         let decoded: CommandEnvelope = serde_json::from_value(value).unwrap();
         assert!(matches!(decoded.payload, EditorCommand::MoveClip { .. }));
+    }
+
+    #[test]
+    fn extended_commands_preserve_exact_inverse_snapshots() {
+        let mut project = ProjectDocument::new("Test".into());
+        let asset_id = Uuid::new_v4();
+        project.media.push(MediaAsset {
+            id: asset_id,
+            name: "clip.mp4".into(),
+            kind: "video".into(),
+            path: "/tmp/clip.mp4".into(),
+            duration: from_seconds(3.0),
+            width: Some(320),
+            height: Some(180),
+            status: "ready".into(),
+            bookmark: None,
+            color: None,
+            thumbnail_path: None,
+            waveform_path: None,
+            codec: Some("h264".into()),
+            has_audio: Some(true),
+            proxy_path: None,
+        });
+        let video_track = project.sequences[0].tracks[0].id;
+        let before = project.clone();
+        let added = dispatch(
+            project,
+            &CommandEnvelope {
+                command_id: Uuid::new_v4(),
+                project_id: before.id,
+                source: "manual".into(),
+                conversation_id: None,
+                batch_id: Uuid::new_v4(),
+                expected_project_revision: 0,
+                payload: EditorCommand::AddClip {
+                    track_id: video_track,
+                    asset_id,
+                    timeline_start: from_seconds(0.0),
+                },
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&added.inverse_patch.after).unwrap(),
+            serde_json::to_value(before).unwrap()
+        );
+        let clip_id = added.project.sequences[0].tracks[0].clips[0].id;
+        let revision = added.project.revision;
+        let project_id = added.project.id;
+        let cropped = dispatch(
+            added.project,
+            &CommandEnvelope {
+                command_id: Uuid::new_v4(),
+                project_id,
+                source: "codex".into(),
+                conversation_id: Some(Uuid::new_v4()),
+                batch_id: Uuid::new_v4(),
+                expected_project_revision: revision,
+                payload: EditorCommand::CropClip {
+                    track_id: video_track,
+                    clip_id,
+                    transform: crate::project::Transform {
+                        x: 10.0,
+                        y: -5.0,
+                        scale: 1.2,
+                        rotation: 0.0,
+                        opacity: 0.8,
+                    },
+                },
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            cropped.project.sequences[0].tracks[0].clips[0]
+                .transform
+                .scale,
+            1.2
+        );
+        assert_eq!(cropped.inverse_patch.after.revision, revision);
     }
 }

@@ -25,7 +25,7 @@ interface EditorState {
   setPlaying: (playing: boolean) => void; togglePlayback: () => void; toggleProjects: () => void; toggleAgent: () => void; toggleTimeline: () => void;
   setMediaTab: (tab: EditorState["mediaTab"]) => void; dispatch: (command: EditorCommand, label?: string) => Promise<boolean>;
   addMedia: (assets: MediaAsset[]) => Promise<void>; addAssetToTimeline: (assetId: string) => Promise<void>;
-  splitSelected: () => Promise<void>; removeSelected: () => Promise<void>; moveSelected: (delta: RationalTime) => Promise<void>; undo: () => Promise<void>; redo: () => Promise<void>;
+  splitSelected: () => Promise<void>; duplicateSelected: () => Promise<void>; removeSelected: () => Promise<void>; moveSelected: (delta: RationalTime) => Promise<void>; undo: () => Promise<void>; redo: () => Promise<void>;
 }
 
 function timelineEnd(project: ProjectDocument): number {
@@ -90,6 +90,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   moveSelected: async (delta) => { const state = get(); const found = selectedLocation(state.project, state.selectedClipId); if (!found) return; await get().dispatch({ type: "moveClip", trackId: found.track.id, clipId: found.clip.id, timelineStart: seconds(Math.max(0, toSeconds(found.clip.timelineStart) + toSeconds(delta))) }, "Move clip"); },
   removeSelected: async () => { const state = get(); const found = selectedLocation(state.project, state.selectedClipId); if (!found) return; if (await get().dispatch({ type: "removeClip", trackId: found.track.id, clipId: found.clip.id }, "Delete clip")) set({ selectedClipId: undefined }); },
   splitSelected: async () => { const state = get(); const found = selectedLocation(state.project, state.selectedClipId); if (!found) return; await get().dispatch({ type: "splitClip", trackId: found.track.id, clipId: found.clip.id, at: state.playhead }, "Split clip"); },
+  duplicateSelected: async () => { const state = get(); const found = selectedLocation(state.project, state.selectedClipId); if (!found) return; const duration = (toSeconds(found.clip.sourceOut) - toSeconds(found.clip.sourceIn)) / found.clip.playbackRate; await get().dispatch({ type: "duplicateClip", trackId: found.track.id, clipId: found.clip.id, timelineStart: seconds(toSeconds(found.clip.timelineStart) + duration) }, "Duplicate clip"); },
   undo: async () => { const state = get(); const entry = state.undoStack.at(-1); if (!entry) return; const project = { ...structuredClone(entry.before), revision: state.project.revision + 1, updatedAt: new Date().toISOString() }; if (state.projectFolder) await invoke("save_project", { folder: state.projectFolder, project }); set({ project, undoStack: state.undoStack.slice(0, -1), redoStack: [...state.redoStack, entry], selectedClipId: undefined, isPlaying: false }); },
   redo: async () => { const state = get(); const entry = state.redoStack.at(-1); if (!entry) return; const project = { ...structuredClone(entry.after), revision: state.project.revision + 1, updatedAt: new Date().toISOString() }; if (state.projectFolder) await invoke("save_project", { folder: state.projectFolder, project }); set({ project, redoStack: state.redoStack.slice(0, -1), undoStack: [...state.undoStack, entry], selectedClipId: undefined, isPlaying: false }); },
 }));

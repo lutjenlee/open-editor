@@ -36,7 +36,12 @@ export const sampleProject: ProjectDocument = {
       ]},
       { id: "c1", name: "Captions", kind: "caption", locked: false, muted: false, clips: [] },
       { id: "a1", name: "Music", kind: "audio", locked: false, muted: false, clips: [] }
-    ]
+    ],
+    captions: [
+      { id: "caption-1", trackId: "c1", start: seconds(1), end: seconds(4.5), text: "Make every second count", style: { fontSize: 48, color: "#ffffff", background: "#000000", position: "bottom" } },
+      { id: "caption-2", trackId: "c1", start: seconds(5.2), end: seconds(9.4), text: "Built for the way you move", style: { fontSize: 48, color: "#ffffff", background: "#000000", position: "bottom" } }
+    ],
+    transitions: []
   }],
   conversations: [
     { id: "chat-1", provider: "codex", title: "Create the first cut", externalThreadId: "thread-demo", createdAt: now, updatedAt: now },

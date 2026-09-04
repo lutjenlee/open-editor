@@ -47,7 +47,7 @@ fn dispatch_editor_command(
     save_atomic(&folder, &result.project)?;
     append_history(
         &folder,
-        &serde_json::json!({ "event": "command", "at": chrono::Utc::now().to_rfc3339(), "envelope": envelope, "newProjectRevision": result.new_project_revision, "affectedEntityIds": result.affected_entity_ids }),
+        &serde_json::json!({ "event": "command", "at": chrono::Utc::now().to_rfc3339(), "envelope": envelope, "newProjectRevision": result.new_project_revision, "affectedEntityIds": result.affected_entity_ids, "forwardPatch": result.forward_patch, "inversePatch": result.inverse_patch }),
     )?;
     Ok(result)
 }

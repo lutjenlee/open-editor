@@ -109,6 +109,40 @@ pub struct Sequence {
     pub height: u32,
     pub frame_rate: RationalTime,
     pub tracks: Vec<Track>,
+    #[serde(default)]
+    pub captions: Vec<CaptionSegment>,
+    #[serde(default)]
+    pub transitions: Vec<Transition>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptionStyle {
+    pub font_size: f64,
+    pub color: String,
+    pub background: String,
+    pub position: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptionSegment {
+    pub id: Uuid,
+    pub track_id: Uuid,
+    pub start: RationalTime,
+    pub end: RationalTime,
+    pub text: String,
+    pub style: CaptionStyle,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Transition {
+    pub id: Uuid,
+    pub from_clip_id: Uuid,
+    pub to_clip_id: Uuid,
+    pub kind: String,
+    pub duration: RationalTime,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -216,6 +250,8 @@ impl ProjectDocument {
                     track("Captions", "caption"),
                     track("Audio 1", "audio"),
                 ],
+                captions: vec![],
+                transitions: vec![],
             }],
             active_sequence_id: sequence_id,
             conversations: vec![],
@@ -306,6 +342,10 @@ impl ProjectDocument {
                     clip.source_in.validate()?;
                     clip.source_out.validate()?;
                     clip.timeline_start.validate()?;
+                    clip.audio.fade_in.validate()?;
+                    clip.audio.fade_out.validate()?;
+                    let clip_duration = (time_value(clip.source_out) - time_value(clip.source_in))
+                        / clip.playback_rate;
                     if !media_ids.contains(&clip.asset_id)
                         || clip.source_in.value < 0
                         || time_value(clip.source_out) <= time_value(clip.source_in)
@@ -314,12 +354,58 @@ impl ProjectDocument {
                         || clip.transform.scale <= 0.0
                         || !(0.0..=1.0).contains(&clip.transform.opacity)
                         || !(0.0..=4.0).contains(&clip.audio.volume)
+                        || clip.audio.fade_in.value < 0
+                        || clip.audio.fade_out.value < 0
+                        || time_value(clip.audio.fade_in) + time_value(clip.audio.fade_out)
+                            > clip_duration
                     {
                         return Err(ProjectError::Invalid(format!(
                             "clip {} has invalid playback or opacity",
                             clip.id
                         )));
                     }
+                }
+            }
+            let clip_ids: HashSet<Uuid> = sequence
+                .tracks
+                .iter()
+                .flat_map(|track| track.clips.iter().map(|clip| clip.id))
+                .collect();
+            let caption_track_ids: HashSet<Uuid> = sequence
+                .tracks
+                .iter()
+                .filter(|track| track.kind == "caption")
+                .map(|track| track.id)
+                .collect();
+            for caption in &sequence.captions {
+                caption.start.validate()?;
+                caption.end.validate()?;
+                if !ids.insert(caption.id)
+                    || !caption_track_ids.contains(&caption.track_id)
+                    || caption.text.trim().is_empty()
+                    || time_value(caption.end) <= time_value(caption.start)
+                    || caption.style.font_size <= 0.0
+                    || !matches!(caption.style.position.as_str(), "top" | "center" | "bottom")
+                {
+                    return Err(ProjectError::Invalid(format!(
+                        "caption {} is invalid",
+                        caption.id
+                    )));
+                }
+            }
+            for transition in &sequence.transitions {
+                transition.duration.validate()?;
+                if !ids.insert(transition.id)
+                    || !clip_ids.contains(&transition.from_clip_id)
+                    || !clip_ids.contains(&transition.to_clip_id)
+                    || transition.from_clip_id == transition.to_clip_id
+                    || transition.duration.value <= 0
+                    || !matches!(transition.kind.as_str(), "cut" | "fade" | "crossDissolve")
+                {
+                    return Err(ProjectError::Invalid(format!(
+                        "transition {} is invalid",
+                        transition.id
+                    )));
                 }
             }
         }

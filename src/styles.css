@@ -103,6 +103,12 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .media-preparation-actions button { flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 26px; border: 1px solid var(--border); border-radius: 6px; background: #111317; color: var(--muted); font-size: 10px; }
 .media-preparation-actions button:hover:not(:disabled) { color: var(--text); background: #17191e; }
 .media-preparation-actions button:disabled { opacity: .55; }
+.clip-inspector { min-height: 34px; display: flex; align-items: center; gap: 12px; padding: 4px 10px; border-bottom: 1px solid var(--border); background: #0d0f12; color: var(--muted); font-size: 10px; }
+.clip-inspector > span { color: var(--text); min-width: 80px; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.clip-inspector label { display: inline-flex; align-items: center; gap: 5px; }
+.clip-inspector select { color: var(--text); background: #17191e; border: 1px solid var(--border); border-radius: 5px; font: inherit; padding: 3px 5px; }
+.clip-inspector input[type="range"] { width: 72px; accent-color: var(--accent); }
+.clip-inspector .check-control input { accent-color: var(--accent); }
 .viewer { grid-column: 2; grid-row: 1; display: grid; grid-template-rows: var(--section-header-height) 1fr 45px; }
 .timeline { grid-column: 1 / -1; grid-row: 2; display: grid; grid-template-rows: 41px 1fr; }
 .app-shell.timeline-closed .editor-grid { grid-template-rows: minmax(0, 1fr); }

@@ -27,4 +27,31 @@ describe("editor command engine", () => {
     expect(toSeconds(left.sourceOut)).toBeCloseTo(toSeconds(clip.sourceIn) + 2 * clip.playbackRate);
     expect(right.sourceIn).toEqual(left.sourceOut);
   });
+
+  it("keeps provider commands inside the user-approved media scope", () => {
+    const envelope = createEnvelope(sampleProject, { type: "removeMedia", assetId: "asset-6" }, "codex");
+    expect(() => applyEditorCommand(sampleProject, envelope)).toThrow(/approved media scope/);
+  });
+
+  it("applies caption, audio, transform, replacement, and transition commands", () => {
+    let project = structuredClone(sampleProject);
+    const run = (payload: Parameters<typeof createEnvelope>[1]) => {
+      const result = applyEditorCommand(project, createEnvelope(project, payload));
+      expect(result.inversePatch.after).toEqual(project);
+      project = result.forwardPatch.after;
+    };
+    run({ type: "fadeAudio", trackId: "v1", clipId: "clip-1", fadeIn: seconds(0.2), fadeOut: seconds(0.3) });
+    run({ type: "duckAudio", trackId: "v1", clipId: "clip-1", enabled: true });
+    run({ type: "cropClip", trackId: "v1", clipId: "clip-1", transform: { x: 12, y: -8, scale: 1.2, rotation: 2, opacity: 0.9 } });
+    run({ type: "replaceClip", trackId: "v1", clipId: "clip-1", assetId: "asset-2" });
+    run({ type: "addCaption", trackId: "c1", start: seconds(10), end: seconds(12), text: "A new caption" });
+    run({ type: "addTransition", fromClipId: "clip-1", toClipId: "clip-2", kind: "crossDissolve", duration: seconds(0.4) });
+    const sequence = project.sequences[0];
+    expect(sequence.captions.at(-1)?.text).toBe("A new caption");
+    expect(sequence.transitions).toHaveLength(1);
+    const clip = sequence.tracks[0].clips[0];
+    expect(clip.audio.ducking).toBe(true);
+    expect(clip.transform.scale).toBe(1.2);
+    expect(clip.assetId).toBe("asset-2");
+  });
 });
