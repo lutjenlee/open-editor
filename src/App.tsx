@@ -1,6 +1,6 @@
 import {
   ChevronDown, ChevronLeft, ChevronRight, CircleUserRound,
-  Download, FilePlus2, Files, Film, Folder, Gauge, Image, Library, Lock, MessageCircle, MessageSquarePlus, Mic2, MoreHorizontal,
+  Download, FilePlus2, Files, Film, Folder, FolderPlus, Gauge, Image, Keyboard, Library, Lock, MessageCircle, MessageSquarePlus, Mic2, MoreHorizontal,
   Music2, PanelBottom, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Pause, Play, Plus, Redo2, Scissors,
   Search, Send, Settings2, SkipBack, SkipForward, Trash2, Undo2, Upload, Volume2, X,
 } from "lucide-react";
@@ -9,7 +9,9 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { formatTimecode, seconds, toSeconds } from "./lib/time";
-import { attachNativePreview, cancelMediaJob, chooseExportPath, controlNativePreview, createProjectFolder, deleteTranscriptionModel, getTranscriptionStatus, importMediaFiles, inspectMediaPaths, isDesktop, listRecentProjects, loadNativePreview, openProjectAtPath, openProjectFolder, relinkMediaFile, removeRecentProject, revealProject, saveProjectFolder, setNativePreviewFrame, setRecentProjectPinned, startMediaJob, startNativeExportJob, startTranscriptionJob, startTranscriptionModelDownload } from "./lib/desktop";
+import { DEFAULT_KEYBOARD_SHORTCUTS, formatShortcut, loadKeyboardShortcuts, matchesShortcut, shortcutFromEvent, SHORTCUT_STORAGE_KEY } from "./lib/shortcuts";
+import type { KeyboardShortcuts, ShortcutAction } from "./lib/shortcuts";
+import { attachNativePreview, cancelMediaJob, chooseExportPath, controlNativePreview, createProjectFolder, deleteTranscriptionModel, getTranscriptionStatus, importMediaFiles, importMediaFolder, inspectMediaPaths, isDesktop, listRecentProjects, loadNativePreview, openProjectAtPath, openProjectFolder, relinkMediaFile, removeRecentProject, revealProject, saveProjectFolder, setNativePreviewFrame, setRecentProjectPinned, startMediaJob, startNativeExportJob, startTranscriptionJob, startTranscriptionModelDownload } from "./lib/desktop";
 import type { MediaJobRecord } from "./lib/desktop";
 import type { TranscriptionStatus } from "./lib/desktop";
 import { useEditorStore } from "./store/editorStore";
@@ -19,7 +21,7 @@ function IconButton({ label, children, onClick, active = false, disabled = false
   return <button className={`icon-button ${active ? "active" : ""}`} aria-label={label} title={label} onClick={onClick} disabled={disabled}>{children}</button>;
 }
 
-function ProjectSidebar({ collapsed, onPreferences }: { collapsed: boolean; onPreferences: () => void }) {
+function ProjectSidebar({ collapsed, onPreferences, onKeyboardShortcuts }: { collapsed: boolean; onPreferences: () => void; onKeyboardShortcuts: () => void }) {
   const project = useEditorStore((s) => s.project);
   const replaceProject = useEditorStore((s) => s.replaceProject);
   const setProjectError = useEditorStore((s) => s.setProjectError);
@@ -29,20 +31,23 @@ function ProjectSidebar({ collapsed, onPreferences }: { collapsed: boolean; onPr
   const closeProject = useEditorStore((s) => s.closeProject);
   const [expandedProjects, setExpandedProjects] = useState(() => new Set([project.name]));
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  const [sidebarMenuOpen, setSidebarMenuOpen] = useState(false);
   const [projectMenu, setProjectMenu] = useState<string>();
   const accountMenuRef = useRef<HTMLDivElement>(null);
+  const sidebarMenuRef = useRef<HTMLDivElement>(null);
   const toggleProject = (name: string) => setExpandedProjects((current) => {
     const next = new Set(current);
     if (next.has(name)) next.delete(name); else next.add(name);
     return next;
   });
   useEffect(() => {
-    if (!accountMenuOpen) return;
+    if (!accountMenuOpen && !sidebarMenuOpen) return;
     const closeMenu = (event: MouseEvent) => {
       if (!accountMenuRef.current?.contains(event.target as Node)) setAccountMenuOpen(false);
+      if (!sidebarMenuRef.current?.contains(event.target as Node)) setSidebarMenuOpen(false);
     };
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setAccountMenuOpen(false);
+      if (event.key === "Escape") { setAccountMenuOpen(false); setSidebarMenuOpen(false); }
     };
     document.addEventListener("mousedown", closeMenu);
     document.addEventListener("keydown", closeOnEscape);
@@ -50,7 +55,7 @@ function ProjectSidebar({ collapsed, onPreferences }: { collapsed: boolean; onPr
       document.removeEventListener("mousedown", closeMenu);
       document.removeEventListener("keydown", closeOnEscape);
     };
-  }, [accountMenuOpen]);
+  }, [accountMenuOpen, sidebarMenuOpen]);
   const chooseProject = async (mode: "create" | "open") => {
     if (!isDesktop()) {
       setProjectError("Folder projects are available in the Tauri desktop app. This browser build is a UI preview.");
@@ -60,7 +65,10 @@ function ProjectSidebar({ collapsed, onPreferences }: { collapsed: boolean; onPr
       const result = mode === "create" ? await createProjectFolder() : await openProjectFolder();
       if (result) replaceProject(result.project, result.folder);
     } catch (error) {
-      setProjectError(error instanceof Error ? error.message : String(error));
+      const message = error instanceof Error ? error.message : String(error);
+      setProjectError(mode === "open" && message.includes("does not contain open-editor.project.json")
+        ? "That folder is not an Open Editor project. Choose New project to create one there."
+        : message);
     }
   };
   const openRecent = async (folder: string) => {
@@ -77,10 +85,10 @@ function ProjectSidebar({ collapsed, onPreferences }: { collapsed: boolean; onPr
   </div>;
   return <aside className="project-sidebar" aria-hidden={collapsed} inert={collapsed}>
     <div className="sidebar-window-drag-region" data-tauri-drag-region />
-    <div className="brand-row"><strong>Open Editor</strong><ChevronDown size={13} /><span className="brand-spacer" /><IconButton label="Sidebar options"><MoreHorizontal size={15} /></IconButton></div>
+    <div className="brand-row"><strong>Open Editor</strong><ChevronDown size={13} /><span className="brand-spacer" /><div className="sidebar-options" ref={sidebarMenuRef}><IconButton label="Sidebar options" active={sidebarMenuOpen} onClick={() => setSidebarMenuOpen((open) => !open)}><MoreHorizontal size={15} /></IconButton>{sidebarMenuOpen && <div className="sidebar-options-menu" role="menu"><button role="menuitem" onClick={() => { setSidebarMenuOpen(false); onKeyboardShortcuts(); }}><Keyboard size={15} /><span>Keyboard shortcuts</span><small>⌘/</small></button><button role="menuitem" onClick={() => { setSidebarMenuOpen(false); onPreferences(); }}><Settings2 size={15} /><span>Preferences</span></button></div>}</div></div>
     <div className="sidebar-actions">
       <button className="primary-action" onClick={() => void chooseProject("create")}><FilePlus2 size={15} /> New project</button>
-      <button className="nav-action" onClick={() => void chooseProject("open")}><Files size={15} /> Open folder</button>
+      <button className="nav-action" onClick={() => void chooseProject("open")}><Files size={15} /> Open project</button>
     </div>
     <div className="sidebar-heading"><span>Pinned</span></div>
     <div className="pinned-list">{recentProjects.filter((item) => item.pinned).map((item) => <div key={item.folder} className="sidebar-project-entry"><button className="sidebar-project-link" onClick={() => void openRecent(item.folder)}><span>{item.name}</span></button>{projectActions(item.folder, true)}</div>)}{!recentProjects.some((item) => item.pinned) && <span className="sidebar-empty">No pinned projects</span>}</div>
@@ -137,6 +145,8 @@ function MediaLibrary() {
   const setTab = useEditorStore((s) => s.setMediaTab);
   const projectFolder = useEditorStore((s) => s.projectFolder);
   const addMedia = useEditorStore((s) => s.addMedia);
+  const addMediaToTimeline = useEditorStore((s) => s.addAssetToTimeline);
+  const selectAsset = useEditorStore((s) => s.selectAsset);
   const setError = useEditorStore((s) => s.setProjectError);
   const selectedAssetId = useEditorStore((s) => s.selectedAssetId);
   const updateProject = useEditorStore((s) => s.updateProject);
@@ -151,16 +161,21 @@ function MediaLibrary() {
     (tab === "all" || asset.kind === tab) &&
     (!normalizedQuery || asset.name.toLocaleLowerCase().includes(normalizedQuery))
   );
-  const importFiles = async () => {
+  const addInspections = async (inspected: Awaited<ReturnType<typeof inspectMediaPaths>>) => {
+    const assets = inspected.map((item, index) => ({ ...item, id: crypto.randomUUID(), status: "ready" as const, color: ["#b97258", "#6978bd", "#568773", "#9e6589", "#3b8067"][index % 5] }));
+    await addMedia(assets);
+    if (assets[0]) selectAsset(assets[0].id);
+    if (assets.length) setError(`Imported ${assets.length} media ${assets.length === 1 ? "file" : "files"}. Select a clip, then choose Add to timeline.`);
+  };
+  const runImport = async (source: "files" | "folder") => {
     if (!projectFolder) { setError("Create or open a folder-backed project before importing media."); return; }
     setImporting(true);
     try {
-      const inspected = await importMediaFiles(projectFolder);
-      addMedia(inspected.map((item, index) => ({ ...item, id: crypto.randomUUID(), status: "ready" as const, color: ["#b97258", "#6978bd", "#568773", "#9e6589", "#3b8067"][index % 5] })));
+      const inspected = source === "files" ? await importMediaFiles(projectFolder) : await importMediaFolder(projectFolder);
+      await addInspections(inspected);
     } catch (error) { setError(error instanceof Error ? error.message : String(error)); }
     finally { setImporting(false); }
   };
-  const addInspections = (inspected: Awaited<ReturnType<typeof inspectMediaPaths>>) => addMedia(inspected.map((item, index) => ({ ...item, id: crypto.randomUUID(), status: "ready" as const, color: ["#b97258", "#6978bd", "#568773", "#9e6589", "#3b8067"][index % 5] })));
   useEffect(() => {
     if (!isDesktop()) return;
     let unlisten: (() => void) | undefined;
@@ -172,7 +187,7 @@ function MediaLibrary() {
         if (!projectFolder) { setError("Create or open a folder-backed project before importing media."); return; }
         setImporting(true);
         void inspectMediaPaths(projectFolder, event.payload.paths)
-          .then(addInspections)
+          .then((inspected) => addInspections(inspected))
           .catch((error) => setError(error instanceof Error ? error.message : String(error)))
           .finally(() => setImporting(false));
       }
@@ -225,13 +240,14 @@ function MediaLibrary() {
   };
   const selectedAsset = project.media.find((asset) => asset.id === selectedAssetId);
   return <section className={`media-library panel ${dropActive ? "drop-active" : ""}`}>
-    <div className="panel-title"><div><Library size={15} /><strong>Media</strong></div><IconButton label="Import media" onClick={() => void importFiles()} disabled={importing}><Upload size={15} /></IconButton></div>
+    <div className="panel-title"><div><Library size={15} /><strong>Media</strong></div><div className="panel-title-actions"><IconButton label="Import files" onClick={() => void runImport("files")} disabled={importing}><Upload size={15} /></IconButton><IconButton label="Import folder" onClick={() => void runImport("folder")} disabled={importing}><FolderPlus size={15} /></IconButton></div></div>
     <div className="media-tabs">
       {(["all", "video", "audio", "image"] as const).map((item) => <button key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>{item}</button>)}
     </div>
     <div className="media-search"><Search size={13} /><input aria-label="Search media" placeholder="Search media" value={query} onChange={(event) => setQuery(event.target.value)} /></div>
-    {selectedAssetId && <div className="media-preparation-actions">
+    {selectedAssetId && selectedAsset && <div className="media-preparation-actions">
       {selectedAsset?.status === "missing" ? <button onClick={() => void relinkSelected()} disabled={Boolean(preparing)}><Files size={13} />Relink</button> : <>
+        <button onClick={() => void addMediaToTimeline(selectedAsset.id)} disabled={Boolean(preparing)}><Plus size={13} />Add to timeline</button>
         <button onClick={() => void prepareSelected("analysis")} disabled={Boolean(preparing)}><Gauge size={13} />{preparing === "analysis" ? "Analyzing…" : "Analyze"}</button>
         {selectedAsset && selectedAsset.kind !== "image" && <button onClick={() => void transcribeSelected()} disabled={Boolean(preparing)}><MessageCircle size={13} />{preparing === "transcription" ? "Transcribing…" : "Transcribe"}</button>}
         {selectedAsset?.kind === "video" && <button onClick={() => void prepareSelected("proxy")} disabled={Boolean(preparing)}><Film size={13} />{preparing === "proxy" ? "Creating…" : "Make proxy"}</button>}
@@ -243,7 +259,7 @@ function MediaLibrary() {
       <button onClick={() => void cancelMediaJob(activeJob.id)} disabled={activeJob.status === "cancelling"}>{activeJob.status === "cancelling" ? "Stopping…" : "Cancel"}</button>
     </div>}
     <div className="media-grid">{filtered.map((asset) => <MediaCard key={asset.id} asset={asset} />)}{filtered.length === 0 && <p className="media-empty">No matching media</p>}</div>
-    <button className="import-drop" onClick={() => void importFiles()} disabled={importing}><Plus size={14} /> {importing ? "Inspecting…" : "Import media"}</button>
+    <div className="import-actions"><button className="import-drop" onClick={() => void runImport("files")} disabled={importing}><Plus size={14} /> {importing ? "Inspecting…" : "Import files"}</button><button className="import-folder" onClick={() => void runImport("folder")} disabled={importing}><FolderPlus size={14} /> Import folder</button></div>
   </section>;
 }
 
@@ -281,6 +297,54 @@ function PreferencesDialog({ onClose }: { onClose: () => void }) {
   </div>;
 }
 
+const shortcutRows: Array<{ action: ShortcutAction; title: string; description: string }> = [
+  { action: "toggleProjects", title: "Toggle project sidebar", description: "Show or hide projects" },
+  { action: "toggleAgent", title: "Toggle chat sidebar", description: "Show or hide the right sidebar" },
+  { action: "toggleTimeline", title: "Toggle timeline", description: "Show or hide the timeline" },
+  { action: "undo", title: "Undo", description: "Undo the latest editor action" },
+  { action: "redo", title: "Redo", description: "Redo the latest editor action" },
+];
+
+function KeyboardShortcutsDialog({ shortcuts, onSave, onClose }: { shortcuts: KeyboardShortcuts; onSave: (shortcuts: KeyboardShortcuts) => void; onClose: () => void }) {
+  const [draft, setDraft] = useState(() => structuredClone(shortcuts));
+  const [recording, setRecording] = useState<ShortcutAction>();
+  const [error, setError] = useState<string>();
+  useEffect(() => {
+    if (!recording) return;
+    const capture = (event: KeyboardEvent) => {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (event.key === "Escape") { setRecording(undefined); setError(undefined); return; }
+      const shortcut = shortcutFromEvent(event);
+      if (!shortcut) return;
+      if (!shortcut.meta && !shortcut.ctrl && !shortcut.alt) {
+        setError("Include Command, Control, or Option in the shortcut.");
+        return;
+      }
+      const conflict = shortcutRows.find(({ action }) => action !== recording && formatShortcut(draft[action]) === formatShortcut(shortcut));
+      if (conflict) {
+        setError(`${formatShortcut(shortcut)} is already assigned to ${conflict.title}.`);
+        return;
+      }
+      setDraft((current) => ({ ...current, [recording]: shortcut }));
+      setRecording(undefined);
+      setError(undefined);
+    };
+    window.addEventListener("keydown", capture, true);
+    return () => window.removeEventListener("keydown", capture, true);
+  }, [draft, recording]);
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+    <section className="preferences-dialog shortcuts-dialog" role="dialog" aria-modal="true" aria-labelledby="shortcuts-title">
+      <header><div><Keyboard size={16} /><strong id="shortcuts-title">Keyboard shortcuts</strong></div><IconButton label="Close keyboard shortcuts" onClick={onClose}><X size={14} /></IconButton></header>
+      <div className="shortcuts-list">
+        {shortcutRows.map((row) => <div className="shortcut-row" key={row.action}><span><strong>{row.title}</strong><small>{row.description}</small></span><button className={recording === row.action ? "recording" : ""} onClick={() => { setRecording(row.action); setError(undefined); }}>{recording === row.action ? "Press shortcut…" : formatShortcut(draft[row.action])}</button></div>)}
+      </div>
+      {error && <p className="shortcut-error" role="alert">{error}</p>}
+      <footer className="shortcuts-footer"><button onClick={() => { setDraft(structuredClone(DEFAULT_KEYBOARD_SHORTCUTS)); setRecording(undefined); setError(undefined); }}>Restore defaults</button><span /><button onClick={onClose}>Cancel</button><button className="primary" onClick={() => onSave(draft)}>Save</button></footer>
+    </section>
+  </div>;
+}
+
 function Viewer() {
   const playing = useEditorStore((s) => s.isPlaying);
   const toggle = useEditorStore((s) => s.togglePlayback);
@@ -293,11 +357,15 @@ function Viewer() {
   const selectedClipId = useEditorStore((s) => s.selectedClipId);
   const dispatch = useEditorStore((s) => s.dispatch);
   const stageRef = useRef<HTMLDivElement>(null);
+  const sourceVideoRef = useRef<HTMLVideoElement>(null);
   const sequence = project.sequences.find((item) => item.id === project.activeSequenceId);
   const selectedClip = sequence?.tracks.flatMap((track) => track.clips).find((clip) => clip.id === selectedClipId);
   const asset = project.media.find((item) => item.id === (selectedClip?.assetId ?? selectedAssetId));
-  const duration = Math.max(1, ...(sequence?.tracks.flatMap((track) => track.clips.map((clip) => toSeconds(clip.timelineStart) + (toSeconds(clip.sourceOut) - toSeconds(clip.sourceIn)) / clip.playbackRate)) ?? [toSeconds(asset?.duration ?? seconds(1))]));
+  const timelineDurations = sequence?.tracks.flatMap((track) => track.clips.map((clip) => toSeconds(clip.timelineStart) + (toSeconds(clip.sourceOut) - toSeconds(clip.sourceIn)) / clip.playbackRate)) ?? [];
+  const duration = Math.max(1, ...(timelineDurations.length ? timelineDurations : [toSeconds(asset?.duration ?? seconds(1))]));
   const nativeReady = isDesktop() && Boolean(projectFolder) && Boolean(sequence?.tracks.some((track) => track.kind === "video" && track.clips.length));
+  const sourceReady = !nativeReady && Boolean(projectFolder) && asset?.kind === "video";
+  const playable = nativeReady || sourceReady;
   const frame = () => {
     const rect = stageRef.current?.getBoundingClientRect();
     return rect ? [rect.x, rect.y, rect.width, rect.height] as [number, number, number, number] : undefined;
@@ -323,23 +391,33 @@ function Viewer() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nativeReady, projectFolder, project.revision]);
   useEffect(() => {
-    if (!nativeReady) return;
-    void controlNativePreview(playing ? "play" : "pause").catch(() => setPlaying(false));
-  }, [nativeReady, playing, setPlaying]);
+    if (nativeReady) {
+      void controlNativePreview(playing ? "play" : "pause").catch(() => setPlaying(false));
+    } else if (sourceReady && sourceVideoRef.current) {
+      if (playing) void sourceVideoRef.current.play().catch(() => setPlaying(false));
+      else sourceVideoRef.current.pause();
+    }
+  }, [nativeReady, sourceReady, playing, setPlaying, asset?.path]);
   useEffect(() => {
-    if (!nativeReady || !playing) return;
+    if (!playable || !playing) return;
     const timer = window.setInterval(() => {
-      void controlNativePreview("status").then((status) => {
-        setPlayhead({ value: status.value, timescale: status.timescale });
-        if (status.rate === 0 && status.value > 0) setPlaying(false);
-      }).catch(() => setPlaying(false));
+      if (nativeReady) {
+        void controlNativePreview("status").then((status) => {
+          setPlayhead({ value: status.value, timescale: status.timescale });
+          if (status.rate === 0 && status.value > 0) setPlaying(false);
+        }).catch(() => setPlaying(false));
+      } else if (sourceVideoRef.current) {
+        setPlayhead(seconds(sourceVideoRef.current.currentTime));
+        if (sourceVideoRef.current.ended) setPlaying(false);
+      }
     }, 100);
     return () => window.clearInterval(timer);
-  }, [nativeReady, playing, setPlayhead, setPlaying]);
+  }, [nativeReady, playable, playing, setPlayhead, setPlaying]);
   const seek = (value: number) => {
     const time = seconds(value);
     setPlayhead(time);
     if (nativeReady) void controlNativePreview("seek", time.value, time.timescale);
+    else if (sourceReady && sourceVideoRef.current) sourceVideoRef.current.currentTime = value;
   };
   const stepFrame = (direction: -1 | 1) => {
     const fps = sequence ? sequence.frameRate.value / sequence.frameRate.timescale : 30;
@@ -348,16 +426,16 @@ function Viewer() {
   return <section className="viewer panel">
     <div className="viewer-toolbar"><div className="sequence-switcher"><select aria-label="Active sequence" value={sequence?.id ?? ""} onChange={(event) => void dispatch({ type: "setActiveSequence", sequenceId: event.target.value }, "Switch sequence")}>{project.sequences.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select><IconButton label="Duplicate sequence" disabled={!sequence} onClick={() => { if (!sequence) return; const name = window.prompt("Name the alternative sequence", `${sequence.name} alternative`); if (name?.trim()) void dispatch({ type: "duplicateSequence", sequenceId: sequence.id, name }, "Duplicate sequence"); }}><Files size={14} /></IconButton></div><div><button>Fit <ChevronDown size={12} /></button><IconButton label="Viewer settings"><Settings2 size={14} /></IconButton></div></div>
     <div className="viewer-stage" ref={stageRef}>
-      {!nativeReady && asset?.kind === "image" && isDesktop() ? <img className="native-video" src={convertFileSrc(asset.path)} alt={asset.name} /> : !nativeReady ? <div className="portrait-video">
+      {sourceReady ? <video key={asset.path} ref={sourceVideoRef} className="native-video" src={convertFileSrc(asset.path)} preload="metadata" onEnded={() => setPlaying(false)} /> : !nativeReady && asset?.kind === "image" && isDesktop() ? <img className="native-video" src={convertFileSrc(asset.path)} alt={asset.name} /> : !nativeReady ? <div className="portrait-video">
         <div className="sun" /><div className="horizon" /><div className="subject"><span /></div>
-        <div className="caption-preview">Create or open a project to preview a sequence.</div>
+        <div className="caption-preview">{projectFolder ? "Import a video, then select it to preview." : "Create or open a project to begin."}</div>
       </div> : null}
       {!nativeReady && <span className="preview-badge">{asset ? `${asset.proxyPath ? "PROXY" : asset.codec ?? asset.kind} · ${asset.width ?? "—"}×${asset.height ?? "—"}` : "NO MEDIA"}</span>}
     </div>
     <div className="transport">
-      <IconButton label="Previous frame" onClick={() => stepFrame(-1)} disabled={!nativeReady}><SkipBack size={15} /></IconButton>
-      <button className="play-button" aria-label={playing ? "Pause" : "Play"} onClick={toggle} disabled={!nativeReady}>{playing ? <Pause size={16} fill="currentColor" /> : <Play size={16} fill="currentColor" />}</button>
-      <IconButton label="Next frame" onClick={() => stepFrame(1)} disabled={!nativeReady}><SkipForward size={15} /></IconButton>
+      <IconButton label="Previous frame" onClick={() => stepFrame(-1)} disabled={!playable}><SkipBack size={15} /></IconButton>
+      <button className="play-button" aria-label={playing ? "Pause" : "Play"} onClick={toggle} disabled={!playable}>{playing ? <Pause size={16} fill="currentColor" /> : <Play size={16} fill="currentColor" />}</button>
+      <IconButton label="Next frame" onClick={() => stepFrame(1)} disabled={!playable}><SkipForward size={15} /></IconButton>
       <span className="timecode">{formatTimecode(playhead)}</span>
       <input className="scrubber" aria-label="Playhead" type="range" min="0" max={duration} step="0.033" value={Math.min(duration, toSeconds(playhead))} onChange={(event) => seek(Number(event.target.value))} />
       <span className="timecode muted">{formatTimecode(seconds(duration))}</span>
@@ -540,11 +618,19 @@ export default function App() {
   const [exportState, setExportState] = useState<"idle" | "exporting">("idle");
   const [exportJob, setExportJob] = useState<MediaJobRecord>();
   const [preferencesOpen, setPreferencesOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [shortcuts, setShortcuts] = useState<KeyboardShortcuts>(() => loadKeyboardShortcuts());
   const saveLabel = saveState === "closed" ? "Create or open a project" : saveState === "saving" ? "Saving…" : saveState === "error" ? "Save failed" : "Saved";
 
   useEffect(() => {
     if (isDesktop()) void listRecentProjects().then(setRecentProjects).catch(() => undefined);
   }, [setRecentProjects]);
+
+  useEffect(() => {
+    if (!projectError) return;
+    const timer = window.setTimeout(() => setProjectError(undefined), 6000);
+    return () => window.clearTimeout(timer);
+  }, [projectError, setProjectError]);
 
   useEffect(() => {
     if (!projectFolder) {
@@ -570,20 +656,36 @@ export default function App() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.metaKey && event.key.toLowerCase() === "b") {
+      if (shortcutsOpen) return;
+      if (matchesShortcut(event, shortcuts.toggleProjects)) {
         event.preventDefault();
         toggleProjects();
-      } else if (event.metaKey && event.key.toLowerCase() === "j") {
+      } else if (matchesShortcut(event, shortcuts.toggleTimeline)) {
         event.preventDefault();
         toggleTimeline();
-      } else if (event.metaKey && event.shiftKey && event.key.toLowerCase() === "i") {
+      } else if (matchesShortcut(event, shortcuts.toggleAgent)) {
         event.preventDefault();
         toggleAgent();
-      } else if (event.metaKey && event.key.toLowerCase() === "z") { event.preventDefault(); if (event.shiftKey) useEditorStore.getState().redo(); else useEditorStore.getState().undo(); }
+      } else if (matchesShortcut(event, shortcuts.redo)) {
+        event.preventDefault();
+        void useEditorStore.getState().redo();
+      } else if (matchesShortcut(event, shortcuts.undo)) {
+        event.preventDefault();
+        void useEditorStore.getState().undo();
+      } else if (event.metaKey && event.key === "/") {
+        event.preventDefault();
+        setShortcutsOpen(true);
+      }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [toggleAgent, toggleProjects, toggleTimeline]);
+  }, [shortcuts, shortcutsOpen, toggleAgent, toggleProjects, toggleTimeline]);
+
+  const saveShortcuts = (next: KeyboardShortcuts) => {
+    window.localStorage.setItem(SHORTCUT_STORAGE_KEY, JSON.stringify(next));
+    setShortcuts(next);
+    setShortcutsOpen(false);
+  };
 
   useEffect(() => {
     if (!isDesktop()) return;
@@ -622,13 +724,13 @@ export default function App() {
   };
 
   return <main className={`app-shell ${projectsOpen ? "projects-open" : ""} ${agentOpen ? "agent-open" : ""} ${timelineOpen ? "timeline-open" : "timeline-closed"}`}>
-    <ProjectSidebar collapsed={!projectsOpen} onPreferences={() => setPreferencesOpen(true)} />
+    <ProjectSidebar collapsed={!projectsOpen} onPreferences={() => setPreferencesOpen(true)} onKeyboardShortcuts={() => setShortcutsOpen(true)} />
     <button
       className="sidebar-toggle"
       aria-label={projectsOpen ? "Close project sidebar" : "Open project sidebar"}
       aria-pressed={projectsOpen}
       data-tooltip="Toggle sidebar"
-      data-shortcut="⌘B"
+      data-shortcut={formatShortcut(shortcuts.toggleProjects)}
       onClick={toggleProjects}
     >
       {projectsOpen ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}
@@ -636,12 +738,13 @@ export default function App() {
     <div className="workspace">
       <header className="titlebar" data-tauri-drag-region>
         <div><Folder className="header-project-icon" size={15} /><span className="project-breadcrumb">{project.name}</span><span className={`save-state ${saveState}`} aria-live="polite">{saveLabel}</span></div>
-        <div className="title-actions"><button className="export-button" onClick={() => exportState === "exporting" && exportJob ? void cancelMediaJob(exportJob.id) : void startExport()} disabled={!projectFolder}><Download size={14} /> {exportState === "exporting" ? `Cancel ${Math.round((exportJob?.progress ?? 0) * 100)}%` : "Export"}</button><IconButton label={`${timelineOpen ? "Close" : "Open"} timeline (⌘J)`} active={timelineOpen} onClick={toggleTimeline}><PanelBottom size={16} /></IconButton><IconButton label={`${agentOpen ? "Close" : "Open"} chat sidebar (⌘⇧I)`} active={agentOpen} onClick={toggleAgent}>{agentOpen ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}</IconButton></div>
+        <div className="title-actions"><button className="export-button" onClick={() => exportState === "exporting" && exportJob ? void cancelMediaJob(exportJob.id) : void startExport()} disabled={!projectFolder}><Download size={14} /> {exportState === "exporting" ? `Cancel ${Math.round((exportJob?.progress ?? 0) * 100)}%` : "Export"}</button><IconButton label={`${timelineOpen ? "Close" : "Open"} timeline (${formatShortcut(shortcuts.toggleTimeline)})`} active={timelineOpen} onClick={toggleTimeline}><PanelBottom size={16} /></IconButton><IconButton label={`${agentOpen ? "Close" : "Open"} chat sidebar (${formatShortcut(shortcuts.toggleAgent)})`} active={agentOpen} onClick={toggleAgent}>{agentOpen ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}</IconButton></div>
       </header>
-      {projectError && <div className="app-notice" role="alert"><span>{projectError}</span><button onClick={() => setProjectError(undefined)}>Dismiss</button></div>}
       <div className="editor-grid"><MediaLibrary /><Viewer /><Timeline /></div>
     </div>
     {agentOpen && <AgentPanel onClose={toggleAgent} />}
     {preferencesOpen && <PreferencesDialog onClose={() => setPreferencesOpen(false)} />}
+    {shortcutsOpen && <KeyboardShortcutsDialog shortcuts={shortcuts} onSave={saveShortcuts} onClose={() => setShortcutsOpen(false)} />}
+    {projectError && <div className="toast-region" aria-live="polite" aria-atomic="true"><div className="app-toast" role="status"><span>{projectError}</span><IconButton label="Dismiss notification" onClick={() => setProjectError(undefined)}><X size={14} /></IconButton></div></div>}
   </main>;
 }

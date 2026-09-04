@@ -78,9 +78,9 @@ The current development focus is the provider-independent local editor. Codex an
 
 Current local workflow:
 
-1. Create or open a folder-backed project.
-2. Import supported media and generate local inspection artifacts.
-3. Double-click media to add it to the appropriate track.
+1. Create a folder-backed project, or open a folder that already contains `open-editor.project.json`.
+2. Import individual files, an entire media folder (including nested folders), or drag files into the window.
+3. Select media to preview it, then choose **Add to timeline** (double-click remains available as a shortcut).
 4. Move, trim, split, duplicate, transform, mix, caption, transition, undo, redo, and create alternative sequences.
 5. Preview the composition and export an H.264/AAC MP4 through AVFoundation.
 

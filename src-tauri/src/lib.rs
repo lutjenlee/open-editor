@@ -405,6 +405,21 @@ fn inspect_media(
 }
 
 #[tauri::command]
+fn inspect_media_folder(
+    media_folder: String,
+    project_folder: String,
+) -> Result<Vec<MediaInspection>, media::MediaError> {
+    let folder = existing_folder(&project_folder)
+        .map_err(|error| media::MediaError::Failed(error.to_string()))?;
+    project::initialize_layout(&folder)
+        .map_err(|error| media::MediaError::Failed(error.to_string()))?;
+    media::media_files_in_folder(std::path::Path::new(&media_folder))?
+        .iter()
+        .map(|path| media::inspect(path, &folder))
+        .collect()
+}
+
+#[tauri::command]
 fn relink_media(
     folder: String,
     asset_id: Uuid,
@@ -1055,6 +1070,7 @@ pub fn run() {
             authorize_command_project,
             deauthorize_command_projects,
             inspect_media,
+            inspect_media_folder,
             relink_media,
             create_media_proxy,
             analyze_media_asset,

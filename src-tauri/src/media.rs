@@ -123,6 +123,71 @@ fn seconds(value: f64) -> RationalTime {
     }
 }
 
+fn is_supported_media_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "mov"
+                    | "mp4"
+                    | "m4v"
+                    | "webm"
+                    | "jpg"
+                    | "jpeg"
+                    | "png"
+                    | "heic"
+                    | "webp"
+                    | "wav"
+                    | "mp3"
+                    | "m4a"
+                    | "aac"
+            )
+        })
+        .unwrap_or(false)
+}
+
+pub fn media_files_in_folder(root: &Path) -> Result<Vec<PathBuf>, MediaError> {
+    if !root.is_dir() {
+        return Err(MediaError::Unsupported(format!(
+            "{} is not a folder",
+            root.display()
+        )));
+    }
+    let mut folders = vec![root.to_path_buf()];
+    let mut files = Vec::new();
+    while let Some(folder) = folders.pop() {
+        for entry in
+            std::fs::read_dir(&folder).map_err(|error| MediaError::Failed(error.to_string()))?
+        {
+            let entry = entry.map_err(|error| MediaError::Failed(error.to_string()))?;
+            let file_type = entry
+                .file_type()
+                .map_err(|error| MediaError::Failed(error.to_string()))?;
+            let path = entry.path();
+            if file_type.is_dir() && entry.file_name() != ".open-editor" {
+                folders.push(path);
+            } else if file_type.is_file() && is_supported_media_path(&path) {
+                files.push(path);
+                if files.len() > 10_000 {
+                    return Err(MediaError::Failed(
+                        "The selected folder contains more than 10,000 media files; choose a smaller folder"
+                            .into(),
+                    ));
+                }
+            }
+        }
+    }
+    files.sort();
+    if files.is_empty() {
+        return Err(MediaError::Unsupported(format!(
+            "No supported media files were found in {}",
+            root.display()
+        )));
+    }
+    Ok(files)
+}
+
 pub fn inspect(path: &Path, project_folder: &Path) -> Result<MediaInspection, MediaError> {
     if !path.is_file() {
         return Err(MediaError::Unsupported(path.display().to_string()));
@@ -684,5 +749,23 @@ mod tests {
         )
         .unwrap();
         assert!(output.metadata().unwrap().len() > 0);
+    }
+
+    #[test]
+    fn folder_import_finds_supported_media_and_skips_project_cache() {
+        let root = tempfile::tempdir().unwrap();
+        let nested = root.path().join("nested");
+        let cache = root.path().join(".open-editor/thumbnails");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(root.path().join("clip.MOV"), []).unwrap();
+        std::fs::write(nested.join("music.mp3"), []).unwrap();
+        std::fs::write(nested.join("notes.txt"), []).unwrap();
+        std::fs::write(cache.join("generated.jpg"), []).unwrap();
+
+        let files = media_files_in_folder(root.path()).unwrap();
+        assert_eq!(files.len(), 2);
+        assert!(files.iter().any(|path| path.ends_with("clip.MOV")));
+        assert!(files.iter().any(|path| path.ends_with("music.mp3")));
     }
 }

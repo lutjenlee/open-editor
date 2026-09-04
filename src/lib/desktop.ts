@@ -61,6 +61,13 @@ export async function importMediaFiles(projectFolder: string): Promise<MediaInsp
   return inspectMediaPaths(projectFolder, paths);
 }
 
+export async function importMediaFolder(projectFolder: string): Promise<MediaInspection[]> {
+  if (!isDesktop()) return [];
+  const folder = await chooseFolder();
+  if (!folder) return [];
+  return invoke<MediaInspection[]>("inspect_media_folder", { mediaFolder: folder, projectFolder });
+}
+
 export async function inspectMediaPaths(projectFolder: string, paths: string[]): Promise<MediaInspection[]> {
   if (!isDesktop() || paths.length === 0) return [];
   return invoke<MediaInspection[]>("inspect_media", { paths, projectFolder });

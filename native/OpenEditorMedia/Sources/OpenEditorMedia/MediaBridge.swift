@@ -335,9 +335,15 @@ public func exportCancel(_ handle: UnsafeMutableRawPointer?) {
 }
 
 @MainActor
+private final class PreviewHostView: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+@MainActor
 final class PreviewController {
     let player = AVPlayer()
     let layer = AVPlayerLayer()
+    private weak var hostView: NSView?
     private var requestedTime: CMTime = .zero
 
     init() {
@@ -347,11 +353,44 @@ final class PreviewController {
     }
 
     func attach(to view: NSView, topLeftFrame: CGRect) {
-        view.wantsLayer = true
+        hostView?.removeFromSuperview()
         layer.removeFromSuperlayer()
-        layer.frame = CGRect(x: topLeftFrame.minX, y: view.bounds.height - topLeftFrame.maxY, width: topLeftFrame.width, height: topLeftFrame.height)
+
+        // WKWebView paints its own child views above sublayers attached directly to
+        // its backing layer. A transparent child NSView keeps AVPlayerLayer above
+        // the web content while hitTest(_: ) lets pointer events reach the editor.
+        let frame = CGRect(
+            x: topLeftFrame.minX,
+            y: view.bounds.height - topLeftFrame.maxY,
+            width: topLeftFrame.width,
+            height: topLeftFrame.height
+        )
+        let host = PreviewHostView(frame: frame)
+        host.wantsLayer = true
+        host.autoresizingMask = []
+        layer.frame = host.bounds
         layer.autoresizingMask = []
-        view.layer?.addSublayer(layer)
+        host.layer?.addSublayer(layer)
+        view.addSubview(host, positioned: .above, relativeTo: nil)
+        hostView = host
+    }
+
+    func setFrame(topLeftFrame: CGRect) -> Bool {
+        guard let host = hostView, let parent = host.superview else { return false }
+        host.frame = CGRect(
+            x: topLeftFrame.minX,
+            y: parent.bounds.height - topLeftFrame.maxY,
+            width: topLeftFrame.width,
+            height: topLeftFrame.height
+        )
+        layer.frame = host.bounds
+        return true
+    }
+
+    func detach() {
+        player.pause()
+        layer.removeFromSuperlayer()
+        hostView?.removeFromSuperview()
     }
 
     func load(path: String) {
@@ -393,8 +432,7 @@ public func playerCreate() -> UnsafeMutableRawPointer? {
 public func playerRelease(_ handle: UnsafeMutableRawPointer?) {
     guard let handle else { return }
     let instance = Unmanaged<PreviewController>.fromOpaque(handle).takeRetainedValue()
-    instance.player.pause()
-    instance.layer.removeFromSuperlayer()
+    instance.detach()
 }
 
 @_cdecl("oe_player_attach")
@@ -418,15 +456,13 @@ public func playerSetFrame(
     _ x: Double, _ y: Double, _ width: Double, _ height: Double
 ) -> Bool {
     guard let instance = controller(handle) else { return false }
-    guard let parent = instance.layer.superlayer else { return false }
-    instance.layer.frame = CGRect(x: x, y: parent.bounds.height - y - height, width: width, height: height)
-    return true
+    return instance.setFrame(topLeftFrame: CGRect(x: x, y: y, width: width, height: height))
 }
 
 @_cdecl("oe_player_detach")
 @MainActor
 public func playerDetach(_ handle: UnsafeMutableRawPointer?) {
-    controller(handle)?.layer.removeFromSuperlayer()
+    controller(handle)?.detach()
 }
 
 @_cdecl("oe_player_load_file")
