@@ -7,6 +7,7 @@ use std::{
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::jobs::JobContext;
 use crate::project::RationalTime;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -34,6 +35,8 @@ pub enum MediaError {
     Unsupported(String),
     #[error("Could not read media metadata: {0}")]
     Decode(String),
+    #[error("Media operation was cancelled")]
+    Cancelled,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -200,17 +203,39 @@ pub fn inspect(path: &Path, project_folder: &Path) -> Result<MediaInspection, Me
     })
 }
 
-fn run_ffmpeg(args: &[String]) -> Result<std::process::Output, MediaError> {
-    Command::new(tool("ffmpeg")?)
+fn run_ffmpeg(
+    args: &[String],
+    job: Option<&JobContext>,
+) -> Result<std::process::Output, MediaError> {
+    if job.is_some_and(JobContext::is_cancelled) {
+        return Err(MediaError::Cancelled);
+    }
+    let child = Command::new(tool("ffmpeg")?)
         .args(args)
-        .output()
-        .map_err(|error| MediaError::Failed(error.to_string()))
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| MediaError::Failed(error.to_string()))?;
+    if let Some(job) = job {
+        job.register_process(Some(child.id()));
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|error| MediaError::Failed(error.to_string()))?;
+    if let Some(job) = job {
+        job.register_process(None);
+        if job.is_cancelled() {
+            return Err(MediaError::Cancelled);
+        }
+    }
+    Ok(output)
 }
 
 pub fn create_proxy(
     source: &Path,
     project_folder: &Path,
     asset_id: Uuid,
+    job: Option<&JobContext>,
 ) -> Result<String, MediaError> {
     let output_path = project_folder
         .join(".open-editor/proxies")
@@ -239,7 +264,16 @@ pub fn create_proxy(
         "5M".into(),
         output_path.display().to_string(),
     ]);
-    let first = run_ffmpeg(&hardware)?;
+    if let Some(job) = job {
+        job.running("Creating playback proxy", 0.1);
+    }
+    let first = match run_ffmpeg(&hardware, job) {
+        Ok(output) => output,
+        Err(error) => {
+            let _ = std::fs::remove_file(&output_path);
+            return Err(error);
+        }
+    };
     if !first.status.success() {
         let mut portable = base;
         portable.extend([
@@ -249,7 +283,16 @@ pub fn create_proxy(
             "4".into(),
             output_path.display().to_string(),
         ]);
-        let second = run_ffmpeg(&portable)?;
+        if let Some(job) = job {
+            job.running("Using compatible proxy encoder", 0.45);
+        }
+        let second = match run_ffmpeg(&portable, job) {
+            Ok(output) => output,
+            Err(error) => {
+                let _ = std::fs::remove_file(&output_path);
+                return Err(error);
+            }
+        };
         if !second.status.success() {
             return Err(MediaError::Failed(
                 String::from_utf8_lossy(&second.stderr).trim().into(),
@@ -272,6 +315,7 @@ pub fn analyze(
     source: &Path,
     project_folder: &Path,
     asset_id: Uuid,
+    job: Option<&JobContext>,
 ) -> Result<LocalAnalysis, MediaError> {
     let analysis_dir = project_folder
         .join(".open-editor/cache/analysis")
@@ -291,7 +335,10 @@ pub fn analyze(
         "vfr".into(),
         scene_pattern.display().to_string(),
     ];
-    let scene_output = run_ffmpeg(&scene_args)?;
+    if let Some(job) = job {
+        job.running("Detecting scenes and extracting keyframes", 0.1);
+    }
+    let scene_output = run_ffmpeg(&scene_args, job)?;
     let scene_log = String::from_utf8_lossy(&scene_output.stderr);
     let scene_times = scene_log
         .lines()
@@ -309,7 +356,10 @@ pub fn analyze(
         "null".into(),
         "-".into(),
     ];
-    let silence_output = run_ffmpeg(&silence_args)?;
+    if let Some(job) = job {
+        job.running("Detecting silence", 0.65);
+    }
+    let silence_output = run_ffmpeg(&silence_args, job)?;
     let mut open_start = None;
     let mut silence_ranges = Vec::new();
     for line in String::from_utf8_lossy(&silence_output.stderr).lines() {
@@ -358,7 +408,7 @@ pub struct ExportRequest {
     pub clips: Vec<ExportClip>,
 }
 
-pub fn export(request: ExportRequest) -> Result<String, MediaError> {
+pub fn export(request: ExportRequest, job: Option<&JobContext>) -> Result<String, MediaError> {
     if request.clips.is_empty() {
         return Err(MediaError::Failed(
             "Add at least one video clip before exporting.".into(),
@@ -421,11 +471,18 @@ pub fn export(request: ExportRequest) -> Result<String, MediaError> {
         "-shortest".into(),
         request.output_path.clone(),
     ]);
-    let output = Command::new(tool("ffmpeg")?)
-        .args(args)
-        .output()
-        .map_err(|e| MediaError::Failed(e.to_string()))?;
+    if let Some(job) = job {
+        job.running("Rendering video", 0.05);
+    }
+    let output = match run_ffmpeg(&args, job) {
+        Ok(output) => output,
+        Err(error) => {
+            let _ = std::fs::remove_file(&request.output_path);
+            return Err(error);
+        }
+    };
     if !output.status.success() {
+        let _ = std::fs::remove_file(&request.output_path);
         return Err(MediaError::Failed(
             String::from_utf8_lossy(&output.stderr).trim().into(),
         ));
@@ -471,29 +528,32 @@ mod tests {
         assert_eq!(inspection.kind, "video");
         assert_eq!(inspection.width, Some(320));
         let asset_id = Uuid::new_v4();
-        let proxy = create_proxy(&source, root.path(), asset_id).unwrap();
+        let proxy = create_proxy(&source, root.path(), asset_id, None).unwrap();
         assert!(Path::new(&proxy).metadata().unwrap().len() > 0);
-        let analysis = analyze(&source, root.path(), asset_id).unwrap();
+        let analysis = analyze(&source, root.path(), asset_id, None).unwrap();
         assert!(analysis
             .scene_times
             .iter()
             .all(|time| time.timescale == 600));
         let output = root.path().join("export.mp4");
-        export(ExportRequest {
-            output_path: output.display().to_string(),
-            width: 180,
-            height: 320,
-            frame_rate: RationalTime {
-                value: 30,
-                timescale: 1,
+        export(
+            ExportRequest {
+                output_path: output.display().to_string(),
+                width: 180,
+                height: 320,
+                frame_rate: RationalTime {
+                    value: 30,
+                    timescale: 1,
+                },
+                clips: vec![ExportClip {
+                    source_path: source.display().to_string(),
+                    source_in: seconds(0.0),
+                    source_out: seconds(0.8),
+                    playback_rate: 1.0,
+                }],
             },
-            clips: vec![ExportClip {
-                source_path: source.display().to_string(),
-                source_in: seconds(0.0),
-                source_out: seconds(0.8),
-                playback_rate: 1.0,
-            }],
-        })
+            None,
+        )
         .unwrap();
         assert!(output.metadata().unwrap().len() > 0);
     }

@@ -1,20 +1,23 @@
 pub mod command;
 pub mod command_service;
+pub mod jobs;
 mod media;
 mod native;
 pub mod project;
 
 use media::{ExportRequest, MediaInspection};
 use project::{
-    append_history, canonical_folder, create, existing_folder, load, save_atomic, AnalysisArtifact,
-    ProjectDocument,
+    append_history, canonical_folder, create, existing_folder, load, lock_exclusive, save_atomic,
+    AnalysisArtifact, ProjectDocument,
 };
+use tauri::Emitter;
 use uuid::Uuid;
 
 pub fn dispatch_persisted(
     folder: &std::path::Path,
     envelope: command::CommandEnvelope,
 ) -> Result<command::CommandResult, project::ProjectError> {
+    let _lock = lock_exclusive(folder)?;
     let project = load(folder)?;
     let result = command::dispatch(project, &envelope)?;
     save_atomic(folder, &result.project)?;
@@ -42,12 +45,30 @@ fn open_project(folder: String) -> Result<ProjectDocument, project::ProjectError
 #[tauri::command]
 fn save_project(folder: String, project: ProjectDocument) -> Result<(), project::ProjectError> {
     let folder = canonical_folder(&folder)?;
+    let _lock = lock_exclusive(&folder)?;
+    if folder.join(project::PROJECT_FILE).exists() {
+        let current = load(&folder)?;
+        if project.revision < current.revision {
+            return Err(project::ProjectError::Invalid(format!(
+                "stale save: incoming revision {}, current {}",
+                project.revision, current.revision
+            )));
+        }
+        if project.revision == current.revision
+            && serde_json::to_value(&project)? != serde_json::to_value(&current)?
+        {
+            return Err(project::ProjectError::Invalid(
+                "conflicting project snapshots have the same revision".into(),
+            ));
+        }
+    }
     save_atomic(&folder, &project)
 }
 
 #[tauri::command]
 fn record_history(folder: String, entry: serde_json::Value) -> Result<(), project::ProjectError> {
     let folder = existing_folder(&folder)?;
+    let _lock = lock_exclusive(&folder)?;
     append_history(&folder, &entry)
 }
 
@@ -92,6 +113,7 @@ fn relink_media(
     inspection: MediaInspection,
 ) -> Result<ProjectDocument, project::ProjectError> {
     let folder = existing_folder(&folder)?;
+    let _lock = lock_exclusive(&folder)?;
     let mut project = load(&folder)?;
     let asset = project
         .media
@@ -134,9 +156,32 @@ fn relink_media(
 
 #[tauri::command]
 async fn export_video(request: ExportRequest) -> Result<String, media::MediaError> {
-    tauri::async_runtime::spawn_blocking(move || media::export(request))
+    tauri::async_runtime::spawn_blocking(move || media::export(request, None))
         .await
         .map_err(|error| media::MediaError::Failed(error.to_string()))?
+}
+
+#[tauri::command]
+fn start_export_job(
+    request: ExportRequest,
+    app: tauri::AppHandle,
+    manager: tauri::State<'_, jobs::JobManager>,
+) -> Result<jobs::JobRecord, media::MediaError> {
+    if request.clips.is_empty() {
+        return Err(media::MediaError::Failed(
+            "Add at least one video clip before exporting.".into(),
+        ));
+    }
+    let (record, context) = manager
+        .create("export", None, Some(app))
+        .map_err(media::MediaError::Failed)?;
+    tauri::async_runtime::spawn_blocking(move || match media::export(request, Some(&context)) {
+        Ok(_path) if context.is_cancelled() => context.finish_cancelled(),
+        Ok(path) => context.complete(serde_json::Value::String(path)),
+        Err(media::MediaError::Cancelled) => context.finish_cancelled(),
+        Err(error) => context.fail(error.to_string()),
+    });
+    Ok(record)
 }
 
 fn asset_source(
@@ -169,6 +214,98 @@ fn asset_source(
     Ok(resolved)
 }
 
+fn create_proxy_persisted(
+    folder: std::path::PathBuf,
+    asset_id: Uuid,
+    job: Option<&jobs::JobContext>,
+) -> Result<ProjectDocument, media::MediaError> {
+    let project = load(&folder).map_err(|error| media::MediaError::Failed(error.to_string()))?;
+    let source = asset_source(&folder, &project, asset_id)?;
+    let proxy_path = media::create_proxy(&source, &folder, asset_id, job)?;
+    let _lock =
+        lock_exclusive(&folder).map_err(|error| media::MediaError::Failed(error.to_string()))?;
+    let mut project =
+        load(&folder).map_err(|error| media::MediaError::Failed(error.to_string()))?;
+    let asset = project
+        .media
+        .iter_mut()
+        .find(|asset| asset.id == asset_id)
+        .ok_or_else(|| media::MediaError::Failed("Media asset is not in this project".into()))?;
+    asset.proxy_path = Some(proxy_path);
+    project.revision += 1;
+    project.updated_at = chrono::Utc::now().to_rfc3339();
+    save_atomic(&folder, &project).map_err(|error| media::MediaError::Failed(error.to_string()))?;
+    append_history(
+        &folder,
+        &serde_json::json!({
+            "event": "proxyCreated", "at": project.updated_at, "assetId": asset_id,
+            "newProjectRevision": project.revision
+        }),
+    )
+    .map_err(|error| media::MediaError::Failed(error.to_string()))?;
+    Ok(project)
+}
+
+fn analyze_persisted(
+    folder: std::path::PathBuf,
+    asset_id: Uuid,
+    job: Option<&jobs::JobContext>,
+) -> Result<ProjectDocument, media::MediaError> {
+    let project = load(&folder).map_err(|error| media::MediaError::Failed(error.to_string()))?;
+    let source = asset_source(&folder, &project, asset_id)?;
+    let report = media::analyze(&source, &folder, asset_id, job)?;
+    let _lock =
+        lock_exclusive(&folder).map_err(|error| media::MediaError::Failed(error.to_string()))?;
+    let mut project =
+        load(&folder).map_err(|error| media::MediaError::Failed(error.to_string()))?;
+    let now = chrono::Utc::now().to_rfc3339();
+    project.analysis_artifacts.retain(|artifact| {
+        artifact.asset_id != asset_id
+            || !matches!(artifact.kind.as_str(), "scenes" | "silence" | "keyframes")
+    });
+    project.analysis_artifacts.extend([
+        AnalysisArtifact {
+            id: Uuid::new_v4(),
+            asset_id,
+            kind: "scenes".into(),
+            status: "ready".into(),
+            created_at: now.clone(),
+            paths: vec![],
+            data: serde_json::to_value(report.scene_times).unwrap_or_default(),
+        },
+        AnalysisArtifact {
+            id: Uuid::new_v4(),
+            asset_id,
+            kind: "silence".into(),
+            status: "ready".into(),
+            created_at: now.clone(),
+            paths: vec![],
+            data: serde_json::to_value(report.silence_ranges).unwrap_or_default(),
+        },
+        AnalysisArtifact {
+            id: Uuid::new_v4(),
+            asset_id,
+            kind: "keyframes".into(),
+            status: "ready".into(),
+            created_at: now.clone(),
+            paths: report.keyframe_paths,
+            data: serde_json::Value::Null,
+        },
+    ]);
+    project.revision += 1;
+    project.updated_at = now;
+    save_atomic(&folder, &project).map_err(|error| media::MediaError::Failed(error.to_string()))?;
+    append_history(
+        &folder,
+        &serde_json::json!({
+            "event": "mediaAnalyzed", "at": project.updated_at, "assetId": asset_id,
+            "newProjectRevision": project.revision
+        }),
+    )
+    .map_err(|error| media::MediaError::Failed(error.to_string()))?;
+    Ok(project)
+}
+
 #[tauri::command]
 async fn create_media_proxy(
     folder: String,
@@ -177,29 +314,7 @@ async fn create_media_proxy(
     tauri::async_runtime::spawn_blocking(move || {
         let folder = existing_folder(&folder)
             .map_err(|error| media::MediaError::Failed(error.to_string()))?;
-        let mut project =
-            load(&folder).map_err(|error| media::MediaError::Failed(error.to_string()))?;
-        let source = asset_source(&folder, &project, asset_id)?;
-        let proxy_path = media::create_proxy(&source, &folder, asset_id)?;
-        let asset = project
-            .media
-            .iter_mut()
-            .find(|asset| asset.id == asset_id)
-            .unwrap();
-        asset.proxy_path = Some(proxy_path);
-        project.revision += 1;
-        project.updated_at = chrono::Utc::now().to_rfc3339();
-        save_atomic(&folder, &project)
-            .map_err(|error| media::MediaError::Failed(error.to_string()))?;
-        append_history(
-            &folder,
-            &serde_json::json!({
-                "event": "proxyCreated", "at": project.updated_at, "assetId": asset_id,
-                "newProjectRevision": project.revision
-            }),
-        )
-        .map_err(|error| media::MediaError::Failed(error.to_string()))?;
-        Ok(project)
+        create_proxy_persisted(folder, asset_id, None)
     })
     .await
     .map_err(|error| media::MediaError::Failed(error.to_string()))?
@@ -213,60 +328,76 @@ async fn analyze_media_asset(
     tauri::async_runtime::spawn_blocking(move || {
         let folder = existing_folder(&folder)
             .map_err(|error| media::MediaError::Failed(error.to_string()))?;
-        let mut project =
-            load(&folder).map_err(|error| media::MediaError::Failed(error.to_string()))?;
-        let source = asset_source(&folder, &project, asset_id)?;
-        let report = media::analyze(&source, &folder, asset_id)?;
-        let now = chrono::Utc::now().to_rfc3339();
-        project.analysis_artifacts.retain(|artifact| {
-            artifact.asset_id != asset_id
-                || !matches!(artifact.kind.as_str(), "scenes" | "silence" | "keyframes")
-        });
-        project.analysis_artifacts.extend([
-            AnalysisArtifact {
-                id: Uuid::new_v4(),
-                asset_id,
-                kind: "scenes".into(),
-                status: "ready".into(),
-                created_at: now.clone(),
-                paths: vec![],
-                data: serde_json::to_value(report.scene_times).unwrap(),
-            },
-            AnalysisArtifact {
-                id: Uuid::new_v4(),
-                asset_id,
-                kind: "silence".into(),
-                status: "ready".into(),
-                created_at: now.clone(),
-                paths: vec![],
-                data: serde_json::to_value(report.silence_ranges).unwrap(),
-            },
-            AnalysisArtifact {
-                id: Uuid::new_v4(),
-                asset_id,
-                kind: "keyframes".into(),
-                status: "ready".into(),
-                created_at: now.clone(),
-                paths: report.keyframe_paths,
-                data: serde_json::Value::Null,
-            },
-        ]);
-        project.revision += 1;
-        project.updated_at = now;
-        save_atomic(&folder, &project)
-            .map_err(|error| media::MediaError::Failed(error.to_string()))?;
-        append_history(
-            &folder,
-            &serde_json::json!({
-                "event": "mediaAnalyzed", "at": project.updated_at, "assetId": asset_id,
-                "newProjectRevision": project.revision
-            }),
-        )
-        .map_err(|error| media::MediaError::Failed(error.to_string()))?;
-        Ok(project)
+        analyze_persisted(folder, asset_id, None)
     })
     .await
     .map_err(|error| media::MediaError::Failed(error.to_string()))?
+}
+
+#[tauri::command]
+fn start_media_job(
+    folder: String,
+    asset_id: Uuid,
+    kind: String,
+    app: tauri::AppHandle,
+    manager: tauri::State<'_, jobs::JobManager>,
+) -> Result<jobs::JobRecord, media::MediaError> {
+    if !matches!(kind.as_str(), "proxy" | "analysis") {
+        return Err(media::MediaError::Failed("Unsupported media job".into()));
+    }
+    let folder =
+        existing_folder(&folder).map_err(|error| media::MediaError::Failed(error.to_string()))?;
+    let project = load(&folder).map_err(|error| media::MediaError::Failed(error.to_string()))?;
+    asset_source(&folder, &project, asset_id)?;
+    let (record, context) = manager
+        .create(kind.clone(), Some(asset_id), Some(app))
+        .map_err(media::MediaError::Failed)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        context.running(
+            if kind == "proxy" {
+                "Preparing proxy"
+            } else {
+                "Preparing analysis"
+            },
+            0.02,
+        );
+        let result = if kind == "proxy" {
+            create_proxy_persisted(folder, asset_id, Some(&context))
+        } else {
+            analyze_persisted(folder, asset_id, Some(&context))
+        };
+        match result {
+            Ok(_project) if context.is_cancelled() => context.finish_cancelled(),
+            Ok(project) => match serde_json::to_value(project) {
+                Ok(value) => context.complete(value),
+                Err(error) => context.fail(error.to_string()),
+            },
+            Err(media::MediaError::Cancelled) => context.finish_cancelled(),
+            Err(error) => context.fail(error.to_string()),
+        }
+    });
+    Ok(record)
+}
+
+#[tauri::command]
+fn get_media_job(
+    job_id: Uuid,
+    manager: tauri::State<'_, jobs::JobManager>,
+) -> Result<jobs::JobRecord, String> {
+    manager
+        .get(job_id)
+        .ok_or_else(|| "job does not exist".into())
+}
+
+#[tauri::command]
+fn cancel_media_job(
+    job_id: Uuid,
+    app: tauri::AppHandle,
+    manager: tauri::State<'_, jobs::JobManager>,
+) -> Result<jobs::JobRecord, String> {
+    let record = manager.cancel(job_id)?;
+    let _ = app.emit("media-job", record.clone());
+    Ok(record)
 }
 
 #[tauri::command]
@@ -286,6 +417,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(command_service::CommandService::default())
+        .manage(jobs::JobManager::default())
         .invoke_handler(tauri::generate_handler![
             create_project,
             open_project,
@@ -297,9 +429,32 @@ pub fn run() {
             relink_media,
             create_media_proxy,
             analyze_media_asset,
+            start_media_job,
+            get_media_job,
+            cancel_media_job,
             export_video,
+            start_export_job,
             runtime_capabilities
         ])
         .run(tauri::generate_context!())
         .expect("error while running Open Editor");
+}
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+
+    #[test]
+    fn stale_autosave_cannot_overwrite_a_newer_revision() {
+        let root = tempfile::tempdir().unwrap();
+        let mut project = ProjectDocument::new("Revision test".into());
+        create(root.path(), &project).unwrap();
+        project.revision = 2;
+        project.updated_at = chrono::Utc::now().to_rfc3339();
+        save_project(root.path().display().to_string(), project.clone()).unwrap();
+        let mut stale = project;
+        stale.revision = 1;
+        assert!(save_project(root.path().display().to_string(), stale).is_err());
+        assert_eq!(load(root.path()).unwrap().revision, 2);
+    }
 }

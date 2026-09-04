@@ -88,3 +88,32 @@ export async function createMediaProxy(folder: string, assetId: string): Promise
 export async function analyzeMediaAsset(folder: string, assetId: string): Promise<ProjectDocument> {
   return invoke<ProjectDocument>("analyze_media_asset", { folder, assetId });
 }
+
+export interface MediaJobRecord {
+  id: string;
+  kind: "proxy" | "analysis" | "export" | "transcription";
+  assetId?: string;
+  status: "queued" | "running" | "cancelling" | "cancelled" | "completed" | "failed";
+  progress: number;
+  message: string;
+  createdAt: string;
+  updatedAt: string;
+  result?: ProjectDocument | string;
+  error?: string;
+}
+
+export async function startMediaJob(folder: string, assetId: string, kind: "proxy" | "analysis"): Promise<MediaJobRecord> {
+  return invoke<MediaJobRecord>("start_media_job", { folder, assetId, kind });
+}
+
+export async function startExportJob(request: ExportRequest): Promise<MediaJobRecord> {
+  return invoke<MediaJobRecord>("start_export_job", { request });
+}
+
+export async function cancelMediaJob(jobId: string): Promise<MediaJobRecord> {
+  return invoke<MediaJobRecord>("cancel_media_job", { jobId });
+}
+
+export async function getMediaJob(jobId: string): Promise<MediaJobRecord> {
+  return invoke<MediaJobRecord>("get_media_job", { jobId });
+}

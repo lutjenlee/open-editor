@@ -4,6 +4,7 @@ use std::{
     collections::HashSet,
     fs::{self, OpenOptions},
     io::Write,
+    os::fd::AsRawFd,
     path::{Path, PathBuf},
 };
 use thiserror::Error;
@@ -11,6 +12,14 @@ use uuid::Uuid;
 
 pub const PROJECT_FILE: &str = "open-editor.project.json";
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+
+pub struct ProjectLock(fs::File);
+
+impl Drop for ProjectLock {
+    fn drop(&mut self) {
+        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum ProjectError {
@@ -433,7 +442,7 @@ pub fn initialize_layout(folder: &Path) -> Result<(), ProjectError> {
     if !ignore.exists() {
         fs::write(
             ignore,
-            "cache/\nproxies/\nthumbnails/\nwaveforms/\ntranscripts/\n",
+            "project.lock\ncache/\nproxies/\nthumbnails/\nwaveforms/\ntranscripts/\n",
         )?;
     }
     let history = hidden.join("history.jsonl");
@@ -441,6 +450,21 @@ pub fn initialize_layout(folder: &Path) -> Result<(), ProjectError> {
         fs::File::create(history)?;
     }
     Ok(())
+}
+
+pub fn lock_exclusive(folder: &Path) -> Result<ProjectLock, ProjectError> {
+    initialize_layout(folder)?;
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(folder.join(".open-editor/project.lock"))?;
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+    if result != 0 {
+        return Err(ProjectError::Io(std::io::Error::last_os_error()));
+    }
+    Ok(ProjectLock(file))
 }
 
 pub fn load(folder: &Path) -> Result<ProjectDocument, ProjectError> {
@@ -552,5 +576,24 @@ mod tests {
             create(root.path(), &replacement),
             Err(ProjectError::AlreadyExists)
         ));
+    }
+
+    #[test]
+    fn serializes_project_writers_with_a_file_lock() {
+        let root = tempfile::tempdir().unwrap();
+        initialize_layout(root.path()).unwrap();
+        let first = lock_exclusive(root.path()).unwrap();
+        let acquired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_acquired = acquired.clone();
+        let folder = root.path().to_path_buf();
+        let worker = std::thread::spawn(move || {
+            let _second = lock_exclusive(&folder).unwrap();
+            worker_acquired.store(true, std::sync::atomic::Ordering::Release);
+        });
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!acquired.load(std::sync::atomic::Ordering::Acquire));
+        drop(first);
+        worker.join().unwrap();
+        assert!(acquired.load(std::sync::atomic::Ordering::Acquire));
     }
 }

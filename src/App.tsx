@@ -6,8 +6,10 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { formatTimecode, seconds, toSeconds } from "./lib/time";
-import { analyzeMediaAsset, chooseExportPath, createMediaProxy, createProjectFolder, exportVideo, importMediaFiles, isDesktop, openProjectAtPath, openProjectFolder, relinkMediaFile, saveProjectFolder } from "./lib/desktop";
+import { cancelMediaJob, chooseExportPath, createProjectFolder, importMediaFiles, isDesktop, openProjectAtPath, openProjectFolder, relinkMediaFile, saveProjectFolder, startExportJob, startMediaJob } from "./lib/desktop";
+import type { MediaJobRecord } from "./lib/desktop";
 import { useEditorStore } from "./store/editorStore";
 import type { MediaAsset, Track } from "./types/project";
 
@@ -130,6 +132,7 @@ function MediaLibrary() {
   const updateProject = useEditorStore((s) => s.updateProject);
   const [importing, setImporting] = useState(false);
   const [preparing, setPreparing] = useState<"proxy" | "analysis">();
+  const [activeJob, setActiveJob] = useState<MediaJobRecord>();
   const [query, setQuery] = useState("");
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const filtered = project.media.filter((asset) =>
@@ -149,13 +152,29 @@ function MediaLibrary() {
     if (!projectFolder || !selectedAssetId) return;
     setPreparing(kind);
     try {
-      const next = kind === "proxy"
-        ? await createMediaProxy(projectFolder, selectedAssetId)
-        : await analyzeMediaAsset(projectFolder, selectedAssetId);
-      updateProject(next);
+      const job = await startMediaJob(projectFolder, selectedAssetId, kind);
+      setActiveJob(job);
     } catch (error) { setError(error instanceof Error ? error.message : String(error)); }
     finally { setPreparing(undefined); }
   };
+  useEffect(() => {
+    if (!isDesktop()) return;
+    let unlisten: (() => void) | undefined;
+    void listen<MediaJobRecord>("media-job", (event) => {
+      const job = event.payload;
+      setActiveJob((current) => current?.id === job.id ? job : current);
+      if (job.status === "completed" && job.result && typeof job.result !== "string") {
+        updateProject(job.result);
+        setPreparing(undefined);
+      } else if (job.status === "failed") {
+        setError(job.error ?? "Media job failed");
+        setPreparing(undefined);
+      } else if (job.status === "cancelled") {
+        setPreparing(undefined);
+      }
+    }).then((dispose) => { unlisten = dispose; });
+    return () => unlisten?.();
+  }, [setError, updateProject]);
   const relinkSelected = async () => {
     if (!projectFolder || !selectedAssetId) return;
     setPreparing("analysis");
@@ -177,6 +196,10 @@ function MediaLibrary() {
         <button onClick={() => void prepareSelected("analysis")} disabled={Boolean(preparing)}><Gauge size={13} />{preparing === "analysis" ? "Analyzing…" : "Analyze"}</button>
         {selectedAsset?.kind === "video" && <button onClick={() => void prepareSelected("proxy")} disabled={Boolean(preparing)}><Film size={13} />{preparing === "proxy" ? "Creating…" : "Make proxy"}</button>}
       </>}
+    </div>}
+    {activeJob && !["completed", "failed", "cancelled"].includes(activeJob.status) && <div className="media-job-progress" aria-live="polite">
+      <span>{activeJob.message}</span><progress max="1" value={activeJob.progress} />
+      <button onClick={() => void cancelMediaJob(activeJob.id)} disabled={activeJob.status === "cancelling"}>{activeJob.status === "cancelling" ? "Stopping…" : "Cancel"}</button>
     </div>}
     <div className="media-grid">{filtered.map((asset) => <MediaCard key={asset.id} asset={asset} />)}{filtered.length === 0 && <p className="media-empty">No matching media</p>}</div>
     <button className="import-drop" onClick={() => void importFiles()} disabled={importing}><Plus size={14} /> {importing ? "Inspecting…" : "Import media"}</button>
@@ -320,6 +343,7 @@ export default function App() {
   const saveQueue = useRef<Promise<void>>(Promise.resolve());
   const saveRequest = useRef(0);
   const [exportState, setExportState] = useState<"idle" | "exporting">("idle");
+  const [exportJob, setExportJob] = useState<MediaJobRecord>();
   const saveLabel = saveState === "demo" ? "Demo · not saved" : saveState === "saving" ? "Saving…" : saveState === "error" ? "Save failed" : "Saved";
 
   useEffect(() => {
@@ -361,6 +385,27 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [toggleAgent, toggleProjects, toggleTimeline]);
 
+  useEffect(() => {
+    if (!isDesktop()) return;
+    let unlisten: (() => void) | undefined;
+    void listen<MediaJobRecord>("media-job", (event) => {
+      const job = event.payload;
+      if (job.kind !== "export") return;
+      setExportJob(job);
+      if (job.status === "completed") {
+        setExportState("idle");
+        setProjectError(`Export complete: ${typeof job.result === "string" ? job.result : "selected file"}`);
+      } else if (job.status === "failed") {
+        setExportState("idle");
+        setProjectError(`Export failed: ${job.error ?? "Unknown error"}`);
+      } else if (job.status === "cancelled") {
+        setExportState("idle");
+        setProjectError("Export cancelled.");
+      }
+    }).then((dispose) => { unlisten = dispose; });
+    return () => unlisten?.();
+  }, [setProjectError]);
+
   const startExport = async () => {
     if (!projectFolder) { setProjectError("Create or open a folder-backed project before exporting."); return; }
     const sequence = project.sequences.find((item) => item.id === project.activeSequenceId);
@@ -371,10 +416,9 @@ export default function App() {
     const outputPath = await chooseExportPath(project.name); if (!outputPath) return;
     setExportState("exporting");
     try {
-      await exportVideo({ outputPath, width: sequence.width, height: sequence.height, frameRate: sequence.frameRate, clips: clips.map(({ clip, asset }) => ({ sourcePath: asset!.path, sourceIn: clip.sourceIn, sourceOut: clip.sourceOut, playbackRate: clip.playbackRate })) });
-      setProjectError(`Export complete: ${outputPath}`);
-    } catch (error) { setProjectError(`Export failed: ${error instanceof Error ? error.message : String(error)}`); }
-    finally { setExportState("idle"); }
+      const job = await startExportJob({ outputPath, width: sequence.width, height: sequence.height, frameRate: sequence.frameRate, clips: clips.map(({ clip, asset }) => ({ sourcePath: asset!.path, sourceIn: clip.sourceIn, sourceOut: clip.sourceOut, playbackRate: clip.playbackRate })) });
+      setExportJob(job);
+    } catch (error) { setProjectError(`Export failed: ${error instanceof Error ? error.message : String(error)}`); setExportState("idle"); }
   };
 
   return <main className={`app-shell ${projectsOpen ? "projects-open" : ""} ${agentOpen ? "agent-open" : ""} ${timelineOpen ? "timeline-open" : "timeline-closed"}`}>
@@ -392,7 +436,7 @@ export default function App() {
     <div className="workspace">
       <header className="titlebar" data-tauri-drag-region>
         <div><Folder className="header-project-icon" size={15} /><span className="project-breadcrumb">{project.name}</span><span className={`save-state ${saveState}`} aria-live="polite">{saveLabel}</span></div>
-        <div className="title-actions"><button className="share-button" onClick={() => setProjectError("Sharing will be available when this local project is connected.")}><Share2 size={14} /> Share</button><button className="export-button" onClick={() => void startExport()} disabled={exportState === "exporting"}><Download size={14} /> {exportState === "exporting" ? "Exporting…" : "Export"}</button><IconButton label={`${timelineOpen ? "Close" : "Open"} timeline (⌘J)`} active={timelineOpen} onClick={toggleTimeline}><PanelBottom size={16} /></IconButton><IconButton label={`${agentOpen ? "Close" : "Open"} chat sidebar (⌘⇧I)`} active={agentOpen} onClick={toggleAgent}>{agentOpen ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}</IconButton></div>
+        <div className="title-actions"><button className="share-button" onClick={() => setProjectError("Sharing will be available when this local project is connected.")}><Share2 size={14} /> Share</button><button className="export-button" onClick={() => exportState === "exporting" && exportJob ? void cancelMediaJob(exportJob.id) : void startExport()}><Download size={14} /> {exportState === "exporting" ? `Cancel ${Math.round((exportJob?.progress ?? 0) * 100)}%` : "Export"}</button><IconButton label={`${timelineOpen ? "Close" : "Open"} timeline (⌘J)`} active={timelineOpen} onClick={toggleTimeline}><PanelBottom size={16} /></IconButton><IconButton label={`${agentOpen ? "Close" : "Open"} chat sidebar (⌘⇧I)`} active={agentOpen} onClick={toggleAgent}>{agentOpen ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}</IconButton></div>
       </header>
       {projectError && <div className="app-notice" role="alert"><span>{projectError}</span><button onClick={() => setProjectError(undefined)}>Dismiss</button></div>}
       <div className="editor-grid"><MediaLibrary /><Viewer /><Timeline /></div>

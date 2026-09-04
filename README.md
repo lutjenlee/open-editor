@@ -83,7 +83,7 @@ Current local workflow:
 4. Move, split, delete, undo, redo, save, reopen, and preview selected media.
 5. Export the video track to a local H.264/AAC MP4.
 
-Still in progress before the provider milestone: native AVFoundation composition playback, complete multitrack audio/overlay/caption rendering, cancellable background-job progress, offline transcription, and release packaging for the remaining media sidecars.
+Proxy creation, analysis, and export now run as observable background jobs; active FFmpeg processes can be cancelled and incomplete export/proxy files are removed. Still in progress before the provider milestone: native AVFoundation composition playback, complete multitrack audio/overlay/caption rendering, offline transcription, and release packaging for the remaining media sidecars.
 
 ## License
 
