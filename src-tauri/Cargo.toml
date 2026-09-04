@@ -12,6 +12,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+swift-rs = { version = "1", features = ["build"] }
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

@@ -1,6 +1,8 @@
 import Testing
 @testable import OpenEditorMedia
 
-@Test func packageLoads() {
-    #expect(true)
+@Test @MainActor func createsAndReleasesAPlayer() {
+    let handle = playerCreate()
+    #expect(handle != nil)
+    playerRelease(handle)
 }
