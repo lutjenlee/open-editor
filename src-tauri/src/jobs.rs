@@ -30,6 +30,7 @@ struct JobEntry {
     record: JobRecord,
     cancelled: Arc<AtomicBool>,
     process_id: Option<u32>,
+    native_handle: Option<usize>,
 }
 
 #[derive(Clone, Default)]
@@ -76,6 +77,7 @@ impl JobManager {
                     record: record.clone(),
                     cancelled: Arc::clone(&cancelled),
                     process_id: None,
+                    native_handle: None,
                 },
             );
         Ok((
@@ -126,6 +128,10 @@ impl JobManager {
         Ok(record)
     }
 
+    pub fn native_handle(&self, id: Uuid) -> Option<usize> {
+        self.entries.lock().ok()?.get(&id)?.native_handle
+    }
+
     fn update(&self, id: Uuid, app: Option<&tauri::AppHandle>, update: impl FnOnce(&mut JobEntry)) {
         let record = self.entries.lock().ok().and_then(|mut entries| {
             let entry = entries.get_mut(&id)?;
@@ -159,9 +165,16 @@ impl JobContext {
         });
     }
 
+    pub fn register_native_handle(&self, native_handle: Option<usize>) {
+        self.manager.update(self.id, self.app.as_ref(), |entry| {
+            entry.native_handle = native_handle;
+        });
+    }
+
     pub fn complete(&self, result: serde_json::Value) {
         self.manager.update(self.id, self.app.as_ref(), |entry| {
             entry.process_id = None;
+            entry.native_handle = None;
             entry.record.status = "completed".into();
             entry.record.progress = 1.0;
             entry.record.message = "Complete".into();
@@ -173,6 +186,7 @@ impl JobContext {
         let error = error.into();
         self.manager.update(self.id, self.app.as_ref(), |entry| {
             entry.process_id = None;
+            entry.native_handle = None;
             entry.record.status = "failed".into();
             entry.record.message = "Failed".into();
             entry.record.error = Some(error);
@@ -182,6 +196,7 @@ impl JobContext {
     pub fn finish_cancelled(&self) {
         self.manager.update(self.id, self.app.as_ref(), |entry| {
             entry.process_id = None;
+            entry.native_handle = None;
             entry.record.status = "cancelled".into();
             entry.record.message = "Cancelled".into();
         });

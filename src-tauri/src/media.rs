@@ -56,11 +56,24 @@ pub struct MediaInspection {
 }
 
 fn tool(name: &str) -> Result<PathBuf, MediaError> {
-    for path in [
-        format!("/opt/homebrew/bin/{name}"),
-        format!("/usr/local/bin/{name}"),
-    ] {
-        let candidate = PathBuf::from(path);
+    let architecture = if cfg!(target_arch = "aarch64") {
+        "aarch64-apple-darwin"
+    } else {
+        "x86_64-apple-darwin"
+    };
+    let executable_folder = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf));
+    let mut candidates = Vec::new();
+    if let Some(folder) = executable_folder {
+        candidates.push(folder.join(name));
+        candidates.push(folder.join(format!("{name}-{architecture}")));
+    }
+    candidates.extend([
+        PathBuf::from(format!("/opt/homebrew/bin/{name}")),
+        PathBuf::from(format!("/usr/local/bin/{name}")),
+    ]);
+    for candidate in candidates {
         if candidate.is_file() {
             return Ok(candidate);
         }
@@ -77,6 +90,30 @@ fn tool(name: &str) -> Result<PathBuf, MediaError> {
     Err(MediaError::ToolMissing(format!(
         "{name}. Install an LGPL-compatible FFmpeg build."
     )))
+}
+
+pub fn whisper_tool() -> Result<PathBuf, MediaError> {
+    let executable_folder = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf));
+    let architecture = if cfg!(target_arch = "aarch64") {
+        "aarch64-apple-darwin"
+    } else {
+        "x86_64-apple-darwin"
+    };
+    let mut candidates = Vec::new();
+    if let Some(folder) = executable_folder {
+        candidates.push(folder.join(format!("whisper-cli-{architecture}")));
+        candidates.push(folder.join("whisper-cli"));
+    }
+    candidates.extend([
+        PathBuf::from("/opt/homebrew/bin/whisper-cli"),
+        PathBuf::from("/usr/local/bin/whisper-cli"),
+    ]);
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .ok_or_else(|| MediaError::ToolMissing("bundled whisper-cli".into()))
 }
 
 fn seconds(value: f64) -> RationalTime {
@@ -387,6 +424,97 @@ pub fn analyze(
         silence_ranges,
         keyframe_paths,
     })
+}
+
+pub fn transcribe(
+    source: &Path,
+    project_folder: &Path,
+    asset_id: Uuid,
+    model: &Path,
+    job: Option<&JobContext>,
+) -> Result<(String, Value), MediaError> {
+    if !model.is_file() {
+        return Err(MediaError::ToolMissing(
+            "Whisper base.en model; install it in Preferences".into(),
+        ));
+    }
+    let workspace = project_folder
+        .join(".open-editor/cache/transcription")
+        .join(asset_id.to_string());
+    std::fs::create_dir_all(&workspace).map_err(|error| MediaError::Failed(error.to_string()))?;
+    let wav = workspace.join("audio.wav");
+    let output_base = project_folder
+        .join(".open-editor/transcripts")
+        .join(asset_id.to_string());
+    if let Some(job) = job {
+        job.running("Preparing audio for transcription", 0.08);
+    }
+    let conversion = run_ffmpeg(
+        &[
+            "-hide_banner".into(),
+            "-loglevel".into(),
+            "error".into(),
+            "-y".into(),
+            "-i".into(),
+            source.display().to_string(),
+            "-ar".into(),
+            "16000".into(),
+            "-ac".into(),
+            "1".into(),
+            "-c:a".into(),
+            "pcm_s16le".into(),
+            wav.display().to_string(),
+        ],
+        job,
+    )?;
+    if !conversion.status.success() {
+        return Err(MediaError::Failed(
+            String::from_utf8_lossy(&conversion.stderr).trim().into(),
+        ));
+    }
+    if let Some(job) = job {
+        job.running("Transcribing locally with Whisper", 0.28);
+    }
+    let mut child = Command::new(whisper_tool()?)
+        .args([
+            "-m",
+            &model.display().to_string(),
+            "-f",
+            &wav.display().to_string(),
+            "-oj",
+            "-of",
+            &output_base.display().to_string(),
+            "-nt",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| MediaError::Failed(error.to_string()))?;
+    if let Some(job) = job {
+        job.register_process(Some(child.id()));
+    }
+    let status = child
+        .wait()
+        .map_err(|error| MediaError::Failed(error.to_string()))?;
+    if let Some(job) = job {
+        job.register_process(None);
+        if job.is_cancelled() {
+            let _ = std::fs::remove_file(&wav);
+            return Err(MediaError::Cancelled);
+        }
+    }
+    if !status.success() {
+        return Err(MediaError::Failed(
+            "whisper-cli failed to transcribe this media".into(),
+        ));
+    }
+    let json_path = output_base.with_extension("json");
+    let transcript: Value = serde_json::from_slice(
+        &std::fs::read(&json_path).map_err(|error| MediaError::Failed(error.to_string()))?,
+    )
+    .map_err(|error| MediaError::Decode(error.to_string()))?;
+    let _ = std::fs::remove_file(wav);
+    Ok((json_path.display().to_string(), transcript))
 }
 
 #[derive(Debug, Deserialize)]

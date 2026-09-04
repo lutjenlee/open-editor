@@ -7,6 +7,7 @@ export function isDesktop(): boolean {
 }
 
 export interface CommandServiceInfo { socketPath: string; capabilityToken: string }
+export interface RecentProject { name: string; folder: string; openedAt: string; pinned: boolean }
 
 export async function authorizeCommandProject(folder: string): Promise<CommandServiceInfo> {
   return invoke<CommandServiceInfo>("authorize_command_project", { folder });
@@ -57,6 +58,11 @@ export async function importMediaFiles(projectFolder: string): Promise<MediaInsp
   });
   const paths = typeof selection === "string" ? [selection] : selection ?? [];
   if (paths.length === 0) return [];
+  return inspectMediaPaths(projectFolder, paths);
+}
+
+export async function inspectMediaPaths(projectFolder: string, paths: string[]): Promise<MediaInspection[]> {
+  if (!isDesktop() || paths.length === 0) return [];
   return invoke<MediaInspection[]>("inspect_media", { paths, projectFolder });
 }
 
@@ -91,7 +97,7 @@ export async function analyzeMediaAsset(folder: string, assetId: string): Promis
 
 export interface MediaJobRecord {
   id: string;
-  kind: "proxy" | "analysis" | "export" | "transcription";
+  kind: "proxy" | "analysis" | "export" | "transcription" | "modelDownload";
   assetId?: string;
   status: "queued" | "running" | "cancelling" | "cancelled" | "completed" | "failed";
   progress: number;
@@ -102,6 +108,32 @@ export interface MediaJobRecord {
   error?: string;
 }
 
+export interface TranscriptionStatus {
+  engineInstalled: boolean;
+  modelInstalled: boolean;
+  modelPath: string;
+  modelName: string;
+  downloadSizeBytes: number;
+  license: string;
+  fullyLocalAfterInstall: boolean;
+}
+
+export async function getTranscriptionStatus(): Promise<TranscriptionStatus> {
+  return invoke<TranscriptionStatus>("transcription_status");
+}
+
+export async function startTranscriptionModelDownload(): Promise<MediaJobRecord> {
+  return invoke<MediaJobRecord>("start_transcription_model_download");
+}
+
+export async function deleteTranscriptionModel(): Promise<void> {
+  return invoke("delete_transcription_model");
+}
+
+export async function startTranscriptionJob(folder: string, assetId: string): Promise<MediaJobRecord> {
+  return invoke<MediaJobRecord>("start_transcription_job", { folder, assetId });
+}
+
 export async function startMediaJob(folder: string, assetId: string, kind: "proxy" | "analysis"): Promise<MediaJobRecord> {
   return invoke<MediaJobRecord>("start_media_job", { folder, assetId, kind });
 }
@@ -110,10 +142,52 @@ export async function startExportJob(request: ExportRequest): Promise<MediaJobRe
   return invoke<MediaJobRecord>("start_export_job", { request });
 }
 
+export async function startNativeExportJob(folder: string, outputPath: string): Promise<MediaJobRecord> {
+  return invoke<MediaJobRecord>("start_native_export_job", { folder, outputPath });
+}
+
 export async function cancelMediaJob(jobId: string): Promise<MediaJobRecord> {
   return invoke<MediaJobRecord>("cancel_media_job", { jobId });
 }
 
 export async function getMediaJob(jobId: string): Promise<MediaJobRecord> {
   return invoke<MediaJobRecord>("get_media_job", { jobId });
+}
+
+export async function listRecentProjects(): Promise<RecentProject[]> {
+  return isDesktop() ? invoke<RecentProject[]>("list_recent_projects") : [];
+}
+
+export async function rememberRecentProject(name: string, folder: string): Promise<RecentProject[]> {
+  return invoke<RecentProject[]>("remember_recent_project", { name, folder });
+}
+
+export async function setRecentProjectPinned(folder: string, pinned: boolean): Promise<RecentProject[]> {
+  return invoke<RecentProject[]>("set_recent_project_pinned", { folder, pinned });
+}
+
+export async function removeRecentProject(folder: string): Promise<RecentProject[]> {
+  return invoke<RecentProject[]>("remove_recent_project", { folder });
+}
+
+export async function revealProject(folder: string): Promise<void> {
+  return invoke("reveal_project", { folder });
+}
+
+export interface NativePlaybackState { value: number; timescale: number; rate: number }
+
+export async function attachNativePreview(frame: [number, number, number, number]): Promise<void> {
+  return invoke("native_preview_attach", { frame });
+}
+
+export async function setNativePreviewFrame(frame: [number, number, number, number]): Promise<void> {
+  return invoke("native_preview_set_frame", { frame });
+}
+
+export async function loadNativePreview(folder: string): Promise<void> {
+  return invoke("native_preview_load", { folder });
+}
+
+export async function controlNativePreview(action: "play" | "pause" | "seek" | "detach" | "status", value?: number, timescale = 600): Promise<NativePlaybackState> {
+  return invoke<NativePlaybackState>("native_preview_control", { action, value, timescale });
 }

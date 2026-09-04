@@ -54,4 +54,17 @@ describe("editor command engine", () => {
     expect(clip.transform.scale).toBe(1.2);
     expect(clip.assetId).toBe("asset-2");
   });
+
+  it("duplicates a sequence without reusing mutable entity identifiers", () => {
+    const result = applyEditorCommand(sampleProject, createEnvelope(sampleProject, {
+      type: "duplicateSequence", sequenceId: sampleProject.activeSequenceId, name: "Alternative",
+    }));
+    const original = result.forwardPatch.after.sequences[0];
+    const alternative = result.forwardPatch.after.sequences[1];
+    expect(alternative.name).toBe("Alternative");
+    expect(result.forwardPatch.after.activeSequenceId).toBe(alternative.id);
+    expect(alternative.id).not.toBe(original.id);
+    expect(alternative.tracks[0].id).not.toBe(original.tracks[0].id);
+    expect(alternative.tracks[0].clips[0].id).not.toBe(original.tracks[0].clips[0].id);
+  });
 });

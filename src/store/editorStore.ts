@@ -1,23 +1,19 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { applyEditorCommand, createEnvelope } from "../lib/commands";
-import { sampleProject } from "../lib/sampleProject";
+import { createEmptyProject } from "../lib/emptyProject";
 import { seconds, toSeconds } from "../lib/time";
 import type { CommandEnvelope, CommandResult, EditorCommand, MediaAsset, ProjectDocument, RationalTime } from "../types/project";
+import type { RecentProject } from "../lib/desktop";
 
 interface HistoryEntry { id: string; label: string; before: ProjectDocument; after: ProjectDocument }
-export interface RecentProject { name: string; folder: string; openedAt: string; pinned: boolean }
-
-function readRecents(): RecentProject[] {
-  try { return JSON.parse(window.localStorage.getItem("open-editor.recents.v1") ?? "[]") as RecentProject[]; }
-  catch { return []; }
-}
-
 interface EditorState {
   project: ProjectDocument; projectFolder?: string; projectError?: string;
   selectedClipId?: string; selectedAssetId?: string; playhead: RationalTime; isPlaying: boolean;
   projectsOpen: boolean; agentOpen: boolean; timelineOpen: boolean; mediaTab: "all" | "video" | "audio" | "image";
   recentProjects: RecentProject[];
+  setRecentProjects: (projects: RecentProject[]) => void;
+  closeProject: () => void;
   undoStack: HistoryEntry[]; redoStack: HistoryEntry[];
   replaceProject: (project: ProjectDocument, folder: string) => void; setProjectError: (message?: string) => void;
   updateProject: (project: ProjectDocument) => void;
@@ -46,15 +42,20 @@ function selectedLocation(project: ProjectDocument, clipId?: string) {
 }
 
 export const useEditorStore = create<EditorState>((set, get) => ({
-  project: sampleProject, selectedClipId: "clip-2", selectedAssetId: "asset-2", playhead: seconds(6.4), isPlaying: false,
+  project: createEmptyProject(), selectedClipId: undefined, selectedAssetId: undefined, playhead: seconds(0), isPlaying: false,
   projectsOpen: window.localStorage.getItem("open-editor.projects-open.v1") !== "false", agentOpen: false,
   timelineOpen: window.localStorage.getItem("open-editor.timeline-open.v1") !== "false", mediaTab: "all",
-  recentProjects: readRecents(),
+  recentProjects: [],
   undoStack: [], redoStack: [],
   replaceProject: (project, projectFolder) => {
     const recents = [{ name: project.name, folder: projectFolder, openedAt: new Date().toISOString(), pinned: false }, ...get().recentProjects.filter((item) => item.folder !== projectFolder)].slice(0, 12);
-    window.localStorage.setItem("open-editor.recents.v1", JSON.stringify(recents));
     set({ project, projectFolder, recentProjects: recents, projectError: undefined, selectedClipId: undefined, selectedAssetId: project.media[0]?.id, playhead: seconds(0), isPlaying: false, undoStack: [], redoStack: [] });
+    if ("__TAURI_INTERNALS__" in window) void invoke<RecentProject[]>("remember_recent_project", { name: project.name, folder: projectFolder }).then((recentProjects) => set({ recentProjects })).catch(() => undefined);
+  },
+  setRecentProjects: (recentProjects) => set({ recentProjects }),
+  closeProject: () => {
+    if ("__TAURI_INTERNALS__" in window) void invoke("deauthorize_command_projects");
+    set({ project: createEmptyProject(), projectFolder: undefined, projectError: undefined, selectedClipId: undefined, selectedAssetId: undefined, playhead: seconds(0), isPlaying: false, undoStack: [], redoStack: [] });
   },
   updateProject: (project) => set({ project, projectError: undefined }),
   setProjectError: (projectError) => set({ projectError }), selectClip: (selectedClipId) => set({ selectedClipId }), selectAsset: (selectedAssetId) => set({ selectedAssetId }),

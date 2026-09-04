@@ -136,12 +136,18 @@ export interface ProjectDocument {
 export type CommandSource = "manual" | "codex" | "ollama";
 
 export type EditorCommand =
+  | { type: "duplicateSequence"; sequenceId: Id; name: string }
+  | { type: "setActiveSequence"; sequenceId: Id }
+  | { type: "renameSequence"; sequenceId: Id; name: string }
+  | { type: "removeSequence"; sequenceId: Id }
+  | { type: "setTrackLocked"; trackId: Id; locked: boolean }
+  | { type: "setTrackMuted"; trackId: Id; muted: boolean }
   | { type: "addMedia"; asset: MediaAsset }
   | { type: "removeMedia"; assetId: Id }
   | { type: "addClip"; trackId: Id; assetId: Id; timelineStart: RationalTime }
   | { type: "removeClip"; trackId: Id; clipId: Id }
   | { type: "moveClip"; trackId: Id; clipId: Id; timelineStart: RationalTime }
-  | { type: "trimClip"; trackId: Id; clipId: Id; sourceIn: RationalTime; sourceOut: RationalTime }
+  | { type: "trimClip"; trackId: Id; clipId: Id; sourceIn: RationalTime; sourceOut: RationalTime; timelineStart?: RationalTime }
   | { type: "splitClip"; trackId: Id; clipId: Id; at: RationalTime }
   | { type: "duplicateClip"; trackId: Id; clipId: Id; timelineStart: RationalTime }
   | { type: "changeSpeed"; trackId: Id; clipId: Id; playbackRate: number }

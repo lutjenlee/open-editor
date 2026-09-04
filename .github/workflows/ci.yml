@@ -26,6 +26,8 @@ jobs:
         run: npm run build
       - name: Frontend tests
         run: npm test
+      - name: Prepare sidecar paths for compile-only checks
+        run: npm run prepare:sidecars
       - name: Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --all-targets
       - name: Build MCP sidecar

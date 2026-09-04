@@ -1,5 +1,6 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::project::{
@@ -26,6 +27,28 @@ pub struct CommandEnvelope {
     rename_all_fields = "camelCase"
 )]
 pub enum EditorCommand {
+    DuplicateSequence {
+        sequence_id: Uuid,
+        name: String,
+    },
+    SetActiveSequence {
+        sequence_id: Uuid,
+    },
+    RenameSequence {
+        sequence_id: Uuid,
+        name: String,
+    },
+    RemoveSequence {
+        sequence_id: Uuid,
+    },
+    SetTrackLocked {
+        track_id: Uuid,
+        locked: bool,
+    },
+    SetTrackMuted {
+        track_id: Uuid,
+        muted: bool,
+    },
     AddMedia {
         asset: Box<MediaAsset>,
     },
@@ -51,6 +74,7 @@ pub enum EditorCommand {
         clip_id: Uuid,
         source_in: RationalTime,
         source_out: RationalTime,
+        timeline_start: Option<RationalTime>,
     },
     SplitClip {
         track_id: Uuid,
@@ -218,6 +242,107 @@ pub fn dispatch(
     let before = project.clone();
     let mut affected = Vec::new();
     match &envelope.payload {
+        EditorCommand::DuplicateSequence { sequence_id, name } => {
+            if name.trim().is_empty() {
+                return Err(ProjectError::Invalid(
+                    "sequence name cannot be empty".into(),
+                ));
+            }
+            let mut sequence = project
+                .sequences
+                .iter()
+                .find(|item| item.id == *sequence_id)
+                .cloned()
+                .ok_or_else(|| ProjectError::Invalid("sequence does not exist".into()))?;
+            let new_sequence_id = Uuid::new_v4();
+            let mut track_ids = HashMap::new();
+            let mut clip_ids = HashMap::new();
+            sequence.id = new_sequence_id;
+            sequence.name = name.trim().into();
+            for track in &mut sequence.tracks {
+                let old = track.id;
+                track.id = Uuid::new_v4();
+                track_ids.insert(old, track.id);
+                for clip in &mut track.clips {
+                    let old = clip.id;
+                    clip.id = Uuid::new_v4();
+                    clip_ids.insert(old, clip.id);
+                }
+            }
+            for caption in &mut sequence.captions {
+                caption.id = Uuid::new_v4();
+                caption.track_id = *track_ids
+                    .get(&caption.track_id)
+                    .ok_or_else(|| ProjectError::Invalid("caption track is invalid".into()))?;
+            }
+            for transition in &mut sequence.transitions {
+                transition.id = Uuid::new_v4();
+                transition.from_clip_id =
+                    *clip_ids.get(&transition.from_clip_id).ok_or_else(|| {
+                        ProjectError::Invalid("transition source clip is invalid".into())
+                    })?;
+                transition.to_clip_id = *clip_ids.get(&transition.to_clip_id).ok_or_else(|| {
+                    ProjectError::Invalid("transition destination clip is invalid".into())
+                })?;
+            }
+            project.sequences.push(sequence);
+            project.active_sequence_id = new_sequence_id;
+            affected.push(new_sequence_id);
+        }
+        EditorCommand::SetActiveSequence { sequence_id } => {
+            if !project.sequences.iter().any(|item| item.id == *sequence_id) {
+                return Err(ProjectError::Invalid("sequence does not exist".into()));
+            }
+            project.active_sequence_id = *sequence_id;
+            affected.push(*sequence_id);
+        }
+        EditorCommand::RenameSequence { sequence_id, name } => {
+            if name.trim().is_empty() {
+                return Err(ProjectError::Invalid(
+                    "sequence name cannot be empty".into(),
+                ));
+            }
+            let sequence = project
+                .sequences
+                .iter_mut()
+                .find(|item| item.id == *sequence_id)
+                .ok_or_else(|| ProjectError::Invalid("sequence does not exist".into()))?;
+            sequence.name = name.trim().into();
+            affected.push(*sequence_id);
+        }
+        EditorCommand::RemoveSequence { sequence_id } => {
+            if project.sequences.len() <= 1 {
+                return Err(ProjectError::Invalid(
+                    "a project must keep one sequence".into(),
+                ));
+            }
+            if !project.sequences.iter().any(|item| item.id == *sequence_id) {
+                return Err(ProjectError::Invalid("sequence does not exist".into()));
+            }
+            project.sequences.retain(|item| item.id != *sequence_id);
+            if project.active_sequence_id == *sequence_id {
+                project.active_sequence_id = project.sequences[0].id;
+            }
+            affected.push(*sequence_id);
+        }
+        EditorCommand::SetTrackLocked { track_id, locked } => {
+            let track = active_sequence(&mut project)?
+                .tracks
+                .iter_mut()
+                .find(|item| item.id == *track_id)
+                .ok_or_else(|| ProjectError::Invalid("track does not exist".into()))?;
+            track.locked = *locked;
+            affected.push(*track_id);
+        }
+        EditorCommand::SetTrackMuted { track_id, muted } => {
+            let track = active_sequence(&mut project)?
+                .tracks
+                .iter_mut()
+                .find(|item| item.id == *track_id)
+                .ok_or_else(|| ProjectError::Invalid("track does not exist".into()))?;
+            track.muted = *muted;
+            affected.push(*track_id);
+        }
         EditorCommand::AddMedia { asset } => {
             if project.media.iter().any(|item| item.id == asset.id) {
                 return Err(ProjectError::Invalid(
@@ -312,6 +437,7 @@ pub fn dispatch(
             clip_id,
             source_in,
             source_out,
+            timeline_start,
         } => {
             if time_seconds(*source_out) <= time_seconds(*source_in) {
                 return Err(ProjectError::Invalid(
@@ -321,6 +447,14 @@ pub fn dispatch(
             let item = clip(active_track(&mut project, *track_id)?, *clip_id)?;
             item.source_in = *source_in;
             item.source_out = *source_out;
+            if let Some(timeline_start) = timeline_start {
+                if timeline_start.value < 0 {
+                    return Err(ProjectError::Invalid(
+                        "clip cannot start before timeline".into(),
+                    ));
+                }
+                item.timeline_start = *timeline_start;
+            }
             affected.push(*clip_id);
         }
         EditorCommand::SplitClip {

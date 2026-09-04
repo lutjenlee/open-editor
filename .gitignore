@@ -151,6 +151,7 @@ vite.config.ts.timestamp-*
 target/
 src-tauri/target/
 src-tauri/binaries/
+.build/
 native/**/.build/
 
 # Local project data and generated media caches

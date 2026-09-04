@@ -46,7 +46,40 @@ export function applyEditorCommand(current: ProjectDocument, envelope: CommandEn
     throw new CommandError("Providers cannot change the project's approved media scope.");
   }
 
-  if (command.type === "addMedia") {
+  if (command.type === "duplicateSequence") {
+    const source = project.sequences.find((item) => item.id === command.sequenceId);
+    if (!source || !command.name.trim()) throw new CommandError("Sequence and name are required.");
+    const duplicate = copy(source);
+    const trackIds = new Map<string, string>();
+    const clipIds = new Map<string, string>();
+    duplicate.id = crypto.randomUUID(); duplicate.name = command.name.trim();
+    for (const track of duplicate.tracks) {
+      const previousTrackId = track.id; track.id = crypto.randomUUID(); trackIds.set(previousTrackId, track.id);
+      for (const clip of track.clips) { const previousClipId = clip.id; clip.id = crypto.randomUUID(); clipIds.set(previousClipId, clip.id); }
+    }
+    for (const caption of duplicate.captions) { caption.id = crypto.randomUUID(); caption.trackId = trackIds.get(caption.trackId)!; }
+    for (const transition of duplicate.transitions) { transition.id = crypto.randomUUID(); transition.fromClipId = clipIds.get(transition.fromClipId)!; transition.toClipId = clipIds.get(transition.toClipId)!; }
+    project.sequences.push(duplicate); project.activeSequenceId = duplicate.id; affected.push(duplicate.id);
+  } else if (command.type === "setActiveSequence") {
+    if (!project.sequences.some((item) => item.id === command.sequenceId)) throw new CommandError("The sequence does not exist.");
+    project.activeSequenceId = command.sequenceId; affected.push(command.sequenceId);
+  } else if (command.type === "renameSequence") {
+    const sequence = project.sequences.find((item) => item.id === command.sequenceId);
+    if (!sequence || !command.name.trim()) throw new CommandError("Sequence and name are required.");
+    sequence.name = command.name.trim(); affected.push(command.sequenceId);
+  } else if (command.type === "removeSequence") {
+    if (project.sequences.length <= 1) throw new CommandError("A project must keep one sequence.");
+    if (!project.sequences.some((item) => item.id === command.sequenceId)) throw new CommandError("The sequence does not exist.");
+    project.sequences = project.sequences.filter((item) => item.id !== command.sequenceId);
+    if (project.activeSequenceId === command.sequenceId) project.activeSequenceId = project.sequences[0].id;
+    affected.push(command.sequenceId);
+  } else if (command.type === "setTrackLocked" || command.type === "setTrackMuted") {
+    const track = activeSequence(project).tracks.find((item) => item.id === command.trackId);
+    if (!track) throw new CommandError("The requested track does not exist.");
+    if (command.type === "setTrackLocked") track.locked = command.locked;
+    else track.muted = command.muted;
+    affected.push(track.id);
+  } else if (command.type === "addMedia") {
     if (project.media.some((item) => item.id === command.asset.id)) throw new CommandError("Media identifier already exists.");
     project.media.push(command.asset); affected.push(command.asset.id);
   } else if (command.type === "removeMedia") {
@@ -106,7 +139,9 @@ export function applyEditorCommand(current: ProjectDocument, envelope: CommandEn
         clip.timelineStart = command.timelineStart; affected.push(clip.id);
       } else if (command.type === "trimClip") {
         if (toSeconds(command.sourceOut) <= toSeconds(command.sourceIn)) throw new CommandError("Trim end must be after trim start.");
-        clip.sourceIn = command.sourceIn; clip.sourceOut = command.sourceOut; affected.push(clip.id);
+        clip.sourceIn = command.sourceIn; clip.sourceOut = command.sourceOut;
+        if (command.timelineStart) clip.timelineStart = command.timelineStart;
+        affected.push(clip.id);
       } else if (command.type === "splitClip") {
         const timelineOffset = toSeconds(command.at) - toSeconds(clip.timelineStart);
         const duration = (toSeconds(clip.sourceOut) - toSeconds(clip.sourceIn)) / clip.playbackRate;

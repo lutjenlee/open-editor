@@ -1,15 +1,17 @@
 import {
   ChevronDown, ChevronLeft, ChevronRight, CircleUserRound,
-  Download, FilePlus2, Files, Film, Folder, Gauge, Image, Library, Lock, LogOut, MessageCircle, MessageSquarePlus, Mic2, MoreHorizontal,
+  Download, FilePlus2, Files, Film, Folder, Gauge, Image, Library, Lock, MessageCircle, MessageSquarePlus, Mic2, MoreHorizontal,
   Music2, PanelBottom, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Pause, Play, Plus, Redo2, Scissors,
-  Search, Send, Settings2, Share2, SkipBack, SkipForward, Trash2, Undo2, Upload, UserPlus, Volume2,
+  Search, Send, Settings2, SkipBack, SkipForward, Trash2, Undo2, Upload, Volume2, X,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { formatTimecode, seconds, toSeconds } from "./lib/time";
-import { cancelMediaJob, chooseExportPath, createProjectFolder, importMediaFiles, isDesktop, openProjectAtPath, openProjectFolder, relinkMediaFile, saveProjectFolder, startExportJob, startMediaJob } from "./lib/desktop";
+import { attachNativePreview, cancelMediaJob, chooseExportPath, controlNativePreview, createProjectFolder, deleteTranscriptionModel, getTranscriptionStatus, importMediaFiles, inspectMediaPaths, isDesktop, listRecentProjects, loadNativePreview, openProjectAtPath, openProjectFolder, relinkMediaFile, removeRecentProject, revealProject, saveProjectFolder, setNativePreviewFrame, setRecentProjectPinned, startMediaJob, startNativeExportJob, startTranscriptionJob, startTranscriptionModelDownload } from "./lib/desktop";
 import type { MediaJobRecord } from "./lib/desktop";
+import type { TranscriptionStatus } from "./lib/desktop";
 import { useEditorStore } from "./store/editorStore";
 import type { MediaAsset, Track } from "./types/project";
 
@@ -17,13 +19,17 @@ function IconButton({ label, children, onClick, active = false, disabled = false
   return <button className={`icon-button ${active ? "active" : ""}`} aria-label={label} title={label} onClick={onClick} disabled={disabled}>{children}</button>;
 }
 
-function ProjectSidebar({ collapsed }: { collapsed: boolean }) {
+function ProjectSidebar({ collapsed, onPreferences }: { collapsed: boolean; onPreferences: () => void }) {
   const project = useEditorStore((s) => s.project);
   const replaceProject = useEditorStore((s) => s.replaceProject);
   const setProjectError = useEditorStore((s) => s.setProjectError);
   const recentProjects = useEditorStore((s) => s.recentProjects);
+  const setRecentProjects = useEditorStore((s) => s.setRecentProjects);
+  const projectFolder = useEditorStore((s) => s.projectFolder);
+  const closeProject = useEditorStore((s) => s.closeProject);
   const [expandedProjects, setExpandedProjects] = useState(() => new Set([project.name]));
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  const [projectMenu, setProjectMenu] = useState<string>();
   const accountMenuRef = useRef<HTMLDivElement>(null);
   const toggleProject = (name: string) => setExpandedProjects((current) => {
     const next = new Set(current);
@@ -61,6 +67,14 @@ function ProjectSidebar({ collapsed }: { collapsed: boolean }) {
     try { const result = await openProjectAtPath(folder); replaceProject(result.project, result.folder); }
     catch (error) { setProjectError(`Could not open recent project: ${error instanceof Error ? error.message : String(error)}`); }
   };
+  const projectActions = (folder: string, pinned: boolean) => <div className="project-context">
+    <IconButton label="Project options" onClick={() => setProjectMenu((open) => open === folder ? undefined : folder)}><MoreHorizontal size={14} /></IconButton>
+    {projectMenu === folder && <div className="project-menu">
+      <button onClick={() => void setRecentProjectPinned(folder, !pinned).then(setRecentProjects).finally(() => setProjectMenu(undefined))}>{pinned ? "Unpin" : "Pin"}</button>
+      <button onClick={() => void revealProject(folder).finally(() => setProjectMenu(undefined))}>Reveal in Finder</button>
+      <button onClick={() => void removeRecentProject(folder).then(setRecentProjects).finally(() => setProjectMenu(undefined))}>Remove from sidebar</button>
+    </div>}
+  </div>;
   return <aside className="project-sidebar" aria-hidden={collapsed} inert={collapsed}>
     <div className="sidebar-window-drag-region" data-tauri-drag-region />
     <div className="brand-row"><strong>Open Editor</strong><ChevronDown size={13} /><span className="brand-spacer" /><IconButton label="Sidebar options"><MoreHorizontal size={15} /></IconButton></div>
@@ -69,36 +83,32 @@ function ProjectSidebar({ collapsed }: { collapsed: boolean }) {
       <button className="nav-action" onClick={() => void chooseProject("open")}><Files size={15} /> Open folder</button>
     </div>
     <div className="sidebar-heading"><span>Pinned</span></div>
-    <div className="pinned-list">{recentProjects.filter((item) => item.pinned).map((item) => <button key={item.folder} className="sidebar-project-link" onClick={() => void openRecent(item.folder)}><span>{item.name}</span></button>)}{!recentProjects.some((item) => item.pinned) && <span className="sidebar-empty">No pinned projects</span>}</div>
+    <div className="pinned-list">{recentProjects.filter((item) => item.pinned).map((item) => <div key={item.folder} className="sidebar-project-entry"><button className="sidebar-project-link" onClick={() => void openRecent(item.folder)}><span>{item.name}</span></button>{projectActions(item.folder, true)}</div>)}{!recentProjects.some((item) => item.pinned) && <span className="sidebar-empty">No pinned projects</span>}</div>
     <div className="sidebar-heading"><span>Projects</span><Search size={13} /></div>
     <div className="project-list">
-      <div className={`project-item ${expandedProjects.has(project.name) ? "expanded" : ""}`}>
-        <button className="project-name" onClick={() => toggleProject(project.name)} aria-expanded={expandedProjects.has(project.name)}>
+      {projectFolder && <div className={`project-item ${expandedProjects.has(project.name) ? "expanded" : ""}`}>
+        <div className="project-name-row"><button className="project-name" onClick={() => toggleProject(project.name)} aria-expanded={expandedProjects.has(project.name)}>
           <Folder size={14} /><span>{project.name}</span><ChevronRight className="project-chevron" size={14} />
-        </button>
+        </button><div className="project-context"><IconButton label="Close project" onClick={closeProject}><PanelLeftClose size={14} /></IconButton></div></div>
         {expandedProjects.has(project.name) && <div className="conversation-list">
           {project.conversations.map((chat, chatIndex) => <button className={chatIndex === 0 ? "selected" : ""} key={chat.id}>{chat.title}</button>)}
         </div>}
-      </div>
-      {recentProjects.filter((item) => item.name !== project.name).map((item) => <div key={item.folder} className={`project-item ${expandedProjects.has(item.name) ? "expanded" : ""}`}>
-        <button className="project-name" onClick={() => toggleProject(item.name)} aria-expanded={expandedProjects.has(item.name)}>
+      </div>}
+      {recentProjects.filter((item) => item.folder !== projectFolder && !item.pinned).map((item) => <div key={item.folder} className={`project-item ${expandedProjects.has(item.name) ? "expanded" : ""}`}>
+        <div className="project-name-row"><button className="project-name" onClick={() => toggleProject(item.name)} aria-expanded={expandedProjects.has(item.name)}>
           <Folder size={14} /><span>{item.name}</span><ChevronRight className="project-chevron" size={14} />
-        </button>
+        </button>{projectActions(item.folder, item.pinned)}</div>
         {expandedProjects.has(item.name) && <div className="conversation-list"><button onClick={() => void openRecent(item.folder)}>Open project</button></div>}
       </div>)}
     </div>
     <div className="sidebar-footer" ref={accountMenuRef}>
       {accountMenuOpen && <div className="account-menu" role="menu">
-        <div className="account-menu-profile"><CircleUserRound size={25} /><span><strong>Codex</strong><small>Connect account</small></span></div>
+        <div className="account-menu-profile"><CircleUserRound size={25} /><span><strong>Local editor</strong><small>Provider-independent mode</small></span></div>
         <div className="account-menu-divider" />
-        <button role="menuitem"><Gauge size={16} /><span>Usage</span><small>View limits</small></button>
-        <button role="menuitem"><UserPlus size={16} /><span>Invite a friend</span></button>
-        <button role="menuitem" onClick={() => setAccountMenuOpen(false)}><Settings2 size={16} /><span>Preferences</span></button>
-        <div className="account-menu-divider" />
-        <button role="menuitem" className="account-menu-muted"><LogOut size={16} /><span>Sign out</span></button>
+        <button role="menuitem" onClick={() => { setAccountMenuOpen(false); onPreferences(); }}><Settings2 size={16} /><span>Preferences</span></button>
       </div>}
       <div className="account-row">
-        <button className="account-button"><CircleUserRound size={17} /><span><strong>Codex</strong><small>Connect account</small></span></button>
+        <button className="account-button" onClick={onPreferences}><CircleUserRound size={17} /><span><strong>Local editor</strong><small>Providers not connected</small></span></button>
         <IconButton label="Account options" active={accountMenuOpen} onClick={() => setAccountMenuOpen((open) => !open)}><MoreHorizontal size={16} /></IconButton>
       </div>
     </div>
@@ -130,9 +140,11 @@ function MediaLibrary() {
   const setError = useEditorStore((s) => s.setProjectError);
   const selectedAssetId = useEditorStore((s) => s.selectedAssetId);
   const updateProject = useEditorStore((s) => s.updateProject);
+  const dispatch = useEditorStore((s) => s.dispatch);
   const [importing, setImporting] = useState(false);
-  const [preparing, setPreparing] = useState<"proxy" | "analysis">();
+  const [preparing, setPreparing] = useState<"proxy" | "analysis" | "transcription">();
   const [activeJob, setActiveJob] = useState<MediaJobRecord>();
+  const [dropActive, setDropActive] = useState(false);
   const [query, setQuery] = useState("");
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const filtered = project.media.filter((asset) =>
@@ -148,6 +160,25 @@ function MediaLibrary() {
     } catch (error) { setError(error instanceof Error ? error.message : String(error)); }
     finally { setImporting(false); }
   };
+  const addInspections = (inspected: Awaited<ReturnType<typeof inspectMediaPaths>>) => addMedia(inspected.map((item, index) => ({ ...item, id: crypto.randomUUID(), status: "ready" as const, color: ["#b97258", "#6978bd", "#568773", "#9e6589", "#3b8067"][index % 5] })));
+  useEffect(() => {
+    if (!isDesktop()) return;
+    let unlisten: (() => void) | undefined;
+    void getCurrentWebview().onDragDropEvent((event) => {
+      if (event.payload.type === "enter" || event.payload.type === "over") setDropActive(true);
+      if (event.payload.type === "leave") setDropActive(false);
+      if (event.payload.type === "drop") {
+        setDropActive(false);
+        if (!projectFolder) { setError("Create or open a folder-backed project before importing media."); return; }
+        setImporting(true);
+        void inspectMediaPaths(projectFolder, event.payload.paths)
+          .then(addInspections)
+          .catch((error) => setError(error instanceof Error ? error.message : String(error)))
+          .finally(() => setImporting(false));
+      }
+    }).then((dispose) => { unlisten = dispose; });
+    return () => unlisten?.();
+  }, [projectFolder, addMedia, setError]);
   const prepareSelected = async (kind: "proxy" | "analysis") => {
     if (!projectFolder || !selectedAssetId) return;
     setPreparing(kind);
@@ -156,6 +187,14 @@ function MediaLibrary() {
       setActiveJob(job);
     } catch (error) { setError(error instanceof Error ? error.message : String(error)); }
     finally { setPreparing(undefined); }
+  };
+  const transcribeSelected = async () => {
+    if (!projectFolder || !selectedAssetId) return;
+    setPreparing("transcription");
+    try {
+      const job = await startTranscriptionJob(projectFolder, selectedAssetId);
+      setActiveJob(job);
+    } catch (error) { setError(error instanceof Error ? error.message : String(error)); setPreparing(undefined); }
   };
   useEffect(() => {
     if (!isDesktop()) return;
@@ -185,7 +224,7 @@ function MediaLibrary() {
     finally { setPreparing(undefined); }
   };
   const selectedAsset = project.media.find((asset) => asset.id === selectedAssetId);
-  return <section className="media-library panel">
+  return <section className={`media-library panel ${dropActive ? "drop-active" : ""}`}>
     <div className="panel-title"><div><Library size={15} /><strong>Media</strong></div><IconButton label="Import media" onClick={() => void importFiles()} disabled={importing}><Upload size={15} /></IconButton></div>
     <div className="media-tabs">
       {(["all", "video", "audio", "image"] as const).map((item) => <button key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>{item}</button>)}
@@ -194,7 +233,9 @@ function MediaLibrary() {
     {selectedAssetId && <div className="media-preparation-actions">
       {selectedAsset?.status === "missing" ? <button onClick={() => void relinkSelected()} disabled={Boolean(preparing)}><Files size={13} />Relink</button> : <>
         <button onClick={() => void prepareSelected("analysis")} disabled={Boolean(preparing)}><Gauge size={13} />{preparing === "analysis" ? "Analyzing…" : "Analyze"}</button>
+        {selectedAsset && selectedAsset.kind !== "image" && <button onClick={() => void transcribeSelected()} disabled={Boolean(preparing)}><MessageCircle size={13} />{preparing === "transcription" ? "Transcribing…" : "Transcribe"}</button>}
         {selectedAsset?.kind === "video" && <button onClick={() => void prepareSelected("proxy")} disabled={Boolean(preparing)}><Film size={13} />{preparing === "proxy" ? "Creating…" : "Make proxy"}</button>}
+        <button onClick={() => { if (selectedAsset && window.confirm(`Remove ${selectedAsset.name} from this project? The original file will not be deleted.`)) void dispatch({ type: "removeMedia", assetId: selectedAsset.id }, `Remove ${selectedAsset.name}`); }} disabled={Boolean(preparing)}><Trash2 size={13} />Remove</button>
       </>}
     </div>}
     {activeJob && !["completed", "failed", "cancelled"].includes(activeJob.status) && <div className="media-job-progress" aria-live="polite">
@@ -206,6 +247,40 @@ function MediaLibrary() {
   </section>;
 }
 
+function PreferencesDialog({ onClose }: { onClose: () => void }) {
+  const [status, setStatus] = useState<TranscriptionStatus>();
+  const [job, setJob] = useState<MediaJobRecord>();
+  const [error, setError] = useState<string>();
+  const refresh = () => void getTranscriptionStatus().then(setStatus).catch((value) => setError(String(value)));
+  useEffect(() => {
+    refresh();
+    let unlisten: (() => void) | undefined;
+    void listen<MediaJobRecord>("media-job", (event) => {
+      if (event.payload.kind !== "modelDownload") return;
+      setJob(event.payload);
+      if (event.payload.status === "completed") refresh();
+      if (event.payload.status === "failed") setError(event.payload.error);
+    }).then((dispose) => { unlisten = dispose; });
+    return () => unlisten?.();
+  }, []);
+  const install = async () => { setError(undefined); try { setJob(await startTranscriptionModelDownload()); } catch (value) { setError(String(value)); } };
+  const remove = async () => {
+    if (!window.confirm("Delete the downloaded Whisper model? It can be installed again later.")) return;
+    try { await deleteTranscriptionModel(); refresh(); } catch (value) { setError(String(value)); }
+  };
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+    <section className="preferences-dialog" role="dialog" aria-modal="true" aria-labelledby="preferences-title">
+      <header><strong id="preferences-title">Preferences</strong><IconButton label="Close preferences" onClick={onClose}><X size={14} /></IconButton></header>
+      <div className="preference-section"><div><strong>Offline transcription</strong><p>Timestamped captions are generated on this Mac with whisper.cpp. Media never leaves the device.</p></div>
+        <dl><dt>Engine</dt><dd>{status?.engineInstalled ? "Installed" : "Not bundled in this development build"}</dd><dt>Model</dt><dd>{status?.modelInstalled ? "Whisper base.en · installed" : "Whisper base.en · 148 MB"}</dd><dt>License</dt><dd>{status?.license ?? "Loading…"}</dd></dl>
+        {job && !["completed", "failed", "cancelled"].includes(job.status) && <div className="model-progress"><span>{job.message}</span><progress max="1" value={job.progress} /><button onClick={() => void cancelMediaJob(job.id)}>Cancel</button></div>}
+        {error && <p className="preference-error">{error}</p>}
+        <div className="preference-actions">{status?.modelInstalled ? <button onClick={() => void remove()}>Delete model</button> : <button className="primary" onClick={() => void install()}>Download verified model</button>}</div>
+      </div>
+    </section>
+  </div>;
+}
+
 function Viewer() {
   const playing = useEditorStore((s) => s.isPlaying);
   const toggle = useEditorStore((s) => s.togglePlayback);
@@ -213,28 +288,76 @@ function Viewer() {
   const setPlayhead = useEditorStore((s) => s.setPlayhead);
   const setPlaying = useEditorStore((s) => s.setPlaying);
   const project = useEditorStore((s) => s.project);
+  const projectFolder = useEditorStore((s) => s.projectFolder);
   const selectedAssetId = useEditorStore((s) => s.selectedAssetId);
   const selectedClipId = useEditorStore((s) => s.selectedClipId);
-  const videoRef = useRef<HTMLVideoElement>(null);
+  const dispatch = useEditorStore((s) => s.dispatch);
+  const stageRef = useRef<HTMLDivElement>(null);
   const sequence = project.sequences.find((item) => item.id === project.activeSequenceId);
   const selectedClip = sequence?.tracks.flatMap((track) => track.clips).find((clip) => clip.id === selectedClipId);
   const asset = project.media.find((item) => item.id === (selectedClip?.assetId ?? selectedAssetId));
   const duration = Math.max(1, ...(sequence?.tracks.flatMap((track) => track.clips.map((clip) => toSeconds(clip.timelineStart) + (toSeconds(clip.sourceOut) - toSeconds(clip.sourceIn)) / clip.playbackRate)) ?? [toSeconds(asset?.duration ?? seconds(1))]));
-  useEffect(() => { const video = videoRef.current; if (!video) return; if (playing) void video.play().catch(() => setPlaying(false)); else video.pause(); }, [playing, setPlaying, asset?.id]);
-  const seek = (value: number) => { setPlayhead(seconds(value)); if (videoRef.current && selectedClip) videoRef.current.currentTime = toSeconds(selectedClip.sourceIn) + Math.max(0, value - toSeconds(selectedClip.timelineStart)) * selectedClip.playbackRate; };
+  const nativeReady = isDesktop() && Boolean(projectFolder) && Boolean(sequence?.tracks.some((track) => track.kind === "video" && track.clips.length));
+  const frame = () => {
+    const rect = stageRef.current?.getBoundingClientRect();
+    return rect ? [rect.x, rect.y, rect.width, rect.height] as [number, number, number, number] : undefined;
+  };
+  useEffect(() => {
+    if (!nativeReady || !projectFolder || !stageRef.current) {
+      if (isDesktop()) void controlNativePreview("detach").catch(() => undefined);
+      return;
+    }
+    const initial = frame();
+    if (!initial) return;
+    let disposed = false;
+    void attachNativePreview(initial)
+      .then(() => loadNativePreview(projectFolder))
+      .then(() => controlNativePreview("seek", playhead.value, playhead.timescale))
+      .catch((error) => { if (!disposed) useEditorStore.getState().setProjectError(`Native preview failed: ${error instanceof Error ? error.message : String(error)}`); });
+    const observer = new ResizeObserver(() => { const next = frame(); if (next) void setNativePreviewFrame(next).catch(() => undefined); });
+    observer.observe(stageRef.current);
+    const reposition = () => { const next = frame(); if (next) void setNativePreviewFrame(next).catch(() => undefined); };
+    window.addEventListener("resize", reposition);
+    return () => { disposed = true; observer.disconnect(); window.removeEventListener("resize", reposition); void controlNativePreview("pause").catch(() => undefined); };
+    // Reload only when the canonical project revision changes; playhead changes are handled separately.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nativeReady, projectFolder, project.revision]);
+  useEffect(() => {
+    if (!nativeReady) return;
+    void controlNativePreview(playing ? "play" : "pause").catch(() => setPlaying(false));
+  }, [nativeReady, playing, setPlaying]);
+  useEffect(() => {
+    if (!nativeReady || !playing) return;
+    const timer = window.setInterval(() => {
+      void controlNativePreview("status").then((status) => {
+        setPlayhead({ value: status.value, timescale: status.timescale });
+        if (status.rate === 0 && status.value > 0) setPlaying(false);
+      }).catch(() => setPlaying(false));
+    }, 100);
+    return () => window.clearInterval(timer);
+  }, [nativeReady, playing, setPlayhead, setPlaying]);
+  const seek = (value: number) => {
+    const time = seconds(value);
+    setPlayhead(time);
+    if (nativeReady) void controlNativePreview("seek", time.value, time.timescale);
+  };
+  const stepFrame = (direction: -1 | 1) => {
+    const fps = sequence ? sequence.frameRate.value / sequence.frameRate.timescale : 30;
+    seek(Math.max(0, Math.min(duration, toSeconds(playhead) + direction / fps)));
+  };
   return <section className="viewer panel">
-    <div className="viewer-toolbar"><span>{sequence?.name ?? "Sequence"}</span><div><button>Fit <ChevronDown size={12} /></button><IconButton label="Viewer settings"><Settings2 size={14} /></IconButton></div></div>
-    <div className="viewer-stage">
-      {asset?.kind === "video" && isDesktop() ? <video ref={videoRef} className="native-video" src={convertFileSrc(asset.proxyPath ?? asset.path)} onEnded={() => setPlaying(false)} onTimeUpdate={(event) => { if (!selectedClip) return; const position = toSeconds(selectedClip.timelineStart) + Math.max(0, event.currentTarget.currentTime - toSeconds(selectedClip.sourceIn)) / selectedClip.playbackRate; setPlayhead(seconds(position)); }} /> : asset?.kind === "image" && isDesktop() ? <img className="native-video" src={convertFileSrc(asset.path)} alt={asset.name} /> : <div className="portrait-video">
+    <div className="viewer-toolbar"><div className="sequence-switcher"><select aria-label="Active sequence" value={sequence?.id ?? ""} onChange={(event) => void dispatch({ type: "setActiveSequence", sequenceId: event.target.value }, "Switch sequence")}>{project.sequences.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select><IconButton label="Duplicate sequence" disabled={!sequence} onClick={() => { if (!sequence) return; const name = window.prompt("Name the alternative sequence", `${sequence.name} alternative`); if (name?.trim()) void dispatch({ type: "duplicateSequence", sequenceId: sequence.id, name }, "Duplicate sequence"); }}><Files size={14} /></IconButton></div><div><button>Fit <ChevronDown size={12} /></button><IconButton label="Viewer settings"><Settings2 size={14} /></IconButton></div></div>
+    <div className="viewer-stage" ref={stageRef}>
+      {!nativeReady && asset?.kind === "image" && isDesktop() ? <img className="native-video" src={convertFileSrc(asset.path)} alt={asset.name} /> : !nativeReady ? <div className="portrait-video">
         <div className="sun" /><div className="horizon" /><div className="subject"><span /></div>
-        <div className="caption-preview">Make every second count.</div>
-      </div>}
-      <span className="preview-badge">{asset ? `${asset.proxyPath ? "PROXY" : asset.codec ?? asset.kind} · ${asset.width ?? "—"}×${asset.height ?? "—"}` : "NO MEDIA"}</span>
+        <div className="caption-preview">Create or open a project to preview a sequence.</div>
+      </div> : null}
+      {!nativeReady && <span className="preview-badge">{asset ? `${asset.proxyPath ? "PROXY" : asset.codec ?? asset.kind} · ${asset.width ?? "—"}×${asset.height ?? "—"}` : "NO MEDIA"}</span>}
     </div>
     <div className="transport">
-      <IconButton label="Previous frame (preview not connected)" disabled><SkipBack size={15} /></IconButton>
-      <button className="play-button" aria-label={playing ? "Pause" : "Play"} onClick={toggle}>{playing ? <Pause size={16} fill="currentColor" /> : <Play size={16} fill="currentColor" />}</button>
-      <IconButton label="Next frame (preview not connected)" disabled><SkipForward size={15} /></IconButton>
+      <IconButton label="Previous frame" onClick={() => stepFrame(-1)} disabled={!nativeReady}><SkipBack size={15} /></IconButton>
+      <button className="play-button" aria-label={playing ? "Pause" : "Play"} onClick={toggle} disabled={!nativeReady}>{playing ? <Pause size={16} fill="currentColor" /> : <Play size={16} fill="currentColor" />}</button>
+      <IconButton label="Next frame" onClick={() => stepFrame(1)} disabled={!nativeReady}><SkipForward size={15} /></IconButton>
       <span className="timecode">{formatTimecode(playhead)}</span>
       <input className="scrubber" aria-label="Playhead" type="range" min="0" max={duration} step="0.033" value={Math.min(duration, toSeconds(playhead))} onChange={(event) => seek(Number(event.target.value))} />
       <span className="timecode muted">{formatTimecode(seconds(duration))}</span>
@@ -244,21 +367,73 @@ function Viewer() {
 }
 
 function TrackRow({ track, pixelsPerSecond, sequence }: { track: Track; pixelsPerSecond: number; sequence: import("./types/project").Sequence }) {
+  const media = useEditorStore((s) => s.project.media);
   const selected = useEditorStore((s) => s.selectedClipId);
   const select = useEditorStore((s) => s.selectClip);
+  const dispatch = useEditorStore((s) => s.dispatch);
   return <div className="track-row">
-    <div className="track-label"><span>{track.name}</span><div><Lock size={11} /><Volume2 size={11} /></div></div>
+    <div className="track-label"><span>{track.name}</span><div><button className={track.locked ? "active" : ""} aria-label={`${track.locked ? "Unlock" : "Lock"} ${track.name}`} onClick={() => void dispatch({ type: "setTrackLocked", trackId: track.id, locked: !track.locked }, "Toggle track lock")}><Lock size={11} /></button><button className={track.muted ? "active" : ""} aria-label={`${track.muted ? "Unmute" : "Mute"} ${track.name}`} onClick={() => void dispatch({ type: "setTrackMuted", trackId: track.id, muted: !track.muted }, "Toggle track mute")}><Volume2 size={11} /></button></div></div>
     <div className={`track-lane ${track.kind}`}>
-      {track.clips.map((clip) => {
-        const start = toSeconds(clip.timelineStart);
-        const duration = (toSeconds(clip.sourceOut) - toSeconds(clip.sourceIn)) / clip.playbackRate;
-        return <button key={clip.id} onClick={() => select(clip.id)} className={`timeline-clip ${selected === clip.id ? "selected" : ""}`} style={{ left: start * pixelsPerSecond, width: Math.max(52, duration * pixelsPerSecond), background: clip.color }}>
-          <span className="clip-filmstrip" /><span>{clip.name}</span><small>{duration.toFixed(1)}s</small>
-        </button>;
-      })}
+      {track.clips.map((clip) => <TimelineClip key={clip.id} clip={clip} track={track} assetDuration={toSeconds(media.find((asset) => asset.id === clip.assetId)?.duration ?? clip.sourceOut)} pixelsPerSecond={pixelsPerSecond} selected={selected === clip.id} onSelect={() => select(clip.id)} onCommand={(command, label) => void dispatch(command, label)} />)}
       {track.kind === "caption" && sequence.captions.filter((caption) => caption.trackId === track.id).map((caption) => <div key={caption.id} className="caption-block" style={{ left: toSeconds(caption.start) * pixelsPerSecond, width: Math.max(52, (toSeconds(caption.end) - toSeconds(caption.start)) * pixelsPerSecond) }}>{caption.text}</div>)}
     </div>
   </div>;
+}
+
+function TimelineClip({ clip, track, assetDuration, pixelsPerSecond, selected, onSelect, onCommand }: {
+  clip: import("./types/project").Clip;
+  track: Track;
+  assetDuration: number;
+  pixelsPerSecond: number;
+  selected: boolean;
+  onSelect: () => void;
+  onCommand: (command: import("./types/project").EditorCommand, label: string) => void;
+}) {
+  const [preview, setPreview] = useState<{ delta: number; edge?: "start" | "end" }>({ delta: 0 });
+  const start = toSeconds(clip.timelineStart);
+  const sourceIn = toSeconds(clip.sourceIn);
+  const sourceOut = toSeconds(clip.sourceOut);
+  const duration = (sourceOut - sourceIn) / clip.playbackRate;
+  const beginDrag = (event: React.PointerEvent, edge?: "start" | "end") => {
+    if (track.locked) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onSelect();
+    const origin = event.clientX;
+    const move = (moveEvent: PointerEvent) => setPreview({ delta: (moveEvent.clientX - origin) / pixelsPerSecond, edge });
+    const finish = (upEvent: PointerEvent) => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", finish);
+      const delta = (upEvent.clientX - origin) / pixelsPerSecond;
+      setPreview({ delta: 0 });
+      if (Math.abs(delta) < 0.02) return;
+      if (!edge) {
+        onCommand({ type: "moveClip", trackId: track.id, clipId: clip.id, timelineStart: seconds(Math.max(0, start + delta)) }, "Move clip");
+      } else if (edge === "start") {
+        const nextIn = Math.max(0, Math.min(sourceOut - 1 / 30, sourceIn + delta * clip.playbackRate));
+        const consumed = (nextIn - sourceIn) / clip.playbackRate;
+        onCommand({ type: "trimClip", trackId: track.id, clipId: clip.id, sourceIn: seconds(nextIn), sourceOut: clip.sourceOut, timelineStart: seconds(Math.max(0, start + consumed)) }, "Trim clip start");
+      } else {
+        const nextOut = Math.min(assetDuration, Math.max(sourceIn + 1 / 30, sourceOut + delta * clip.playbackRate));
+        onCommand({ type: "trimClip", trackId: track.id, clipId: clip.id, sourceIn: clip.sourceIn, sourceOut: seconds(nextOut) }, "Trim clip end");
+      }
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", finish, { once: true });
+  };
+  const startDelta = preview.edge === "start" ? preview.delta : 0;
+  const widthDelta = preview.edge === "start" ? -preview.delta : preview.edge === "end" ? preview.delta : 0;
+  return <button
+    onClick={onSelect}
+    onPointerDown={(event) => beginDrag(event)}
+    className={`timeline-clip ${selected ? "selected" : ""}`}
+    style={{ left: Math.max(0, start + (preview.edge ? startDelta : preview.delta)) * pixelsPerSecond, width: Math.max(24, (duration + widthDelta) * pixelsPerSecond), background: clip.color }}
+    aria-label={`${clip.name}, ${duration.toFixed(1)} seconds`}
+  >
+    <span className="trim-handle start" onPointerDown={(event) => beginDrag(event, "start")} />
+    <span className="clip-filmstrip" /><span>{clip.name}</span><small>{duration.toFixed(1)}s</small>
+    <span className="trim-handle end" onPointerDown={(event) => beginDrag(event, "end")} />
+  </button>;
 }
 
 function Timeline() {
@@ -272,11 +447,15 @@ function Timeline() {
   const duplicate = useEditorStore((s) => s.duplicateSelected);
   const dispatch = useEditorStore((s) => s.dispatch);
   const selectedClipId = useEditorStore((s) => s.selectedClipId);
+  const selectedAssetId = useEditorStore((s) => s.selectedAssetId);
   const canUndo = useEditorStore((s) => s.undoStack.length > 0);
   const canRedo = useEditorStore((s) => s.redoStack.length > 0);
   const sequence = project.sequences.find((item) => item.id === project.activeSequenceId)!;
-  const px = 42;
+  const [px, setPx] = useState(42);
   const selected = sequence.tracks.flatMap((track) => track.clips.map((clip) => ({ track, clip }))).find((item) => item.clip.id === selectedClipId);
+  const selectedIndex = selected ? selected.track.clips.findIndex((clip) => clip.id === selected.clip.id) : -1;
+  const nextClip = selected && selectedIndex >= 0 ? selected.track.clips[selectedIndex + 1] : undefined;
+  const outgoingTransition = selected ? sequence.transitions.find((item) => item.fromClipId === selected.clip.id) : undefined;
   const addCaption = () => {
     const track = sequence.tracks.find((item) => item.kind === "caption");
     if (track) void dispatch({ type: "addCaption", trackId: track.id, start: playhead, end: seconds(toSeconds(playhead) + 2), text: "New caption" }, "Add caption");
@@ -284,15 +463,29 @@ function Timeline() {
   return <section className="timeline panel">
     <div className="timeline-toolbar">
       <div><strong>Timeline</strong><span className="sequence-pill">9:16 · 1080 × 1920</span></div>
-      <div className="timeline-tools"><IconButton label="Undo" onClick={undo} disabled={!canUndo}><Undo2 size={14} /></IconButton><IconButton label="Redo" onClick={redo} disabled={!canRedo}><Redo2 size={14} /></IconButton><span className="toolbar-divider" /><IconButton label="Add caption" onClick={addCaption}><MessageSquarePlus size={14} /></IconButton><IconButton label="Move left" onClick={() => move(seconds(-0.25))} disabled={!selected}><ChevronLeft size={14} /></IconButton><IconButton label="Split clip" onClick={split} disabled={!selected}><Scissors size={14} /></IconButton><IconButton label="Duplicate clip" onClick={duplicate} disabled={!selected}><Files size={14} /></IconButton><IconButton label="Move right" onClick={() => move(seconds(0.25))} disabled={!selected}><ChevronRight size={14} /></IconButton><IconButton label="Delete clip" onClick={remove} disabled={!selected}><Trash2 size={14} /></IconButton></div>
+      <div className="timeline-tools"><label className="timeline-zoom">Zoom<input aria-label="Timeline zoom" type="range" min="24" max="100" step="2" value={px} onChange={(event) => setPx(Number(event.target.value))} /></label><IconButton label="Undo" onClick={undo} disabled={!canUndo}><Undo2 size={14} /></IconButton><IconButton label="Redo" onClick={redo} disabled={!canRedo}><Redo2 size={14} /></IconButton><span className="toolbar-divider" /><IconButton label="Add caption" onClick={addCaption}><MessageSquarePlus size={14} /></IconButton><IconButton label="Move left" onClick={() => move(seconds(-0.25))} disabled={!selected}><ChevronLeft size={14} /></IconButton><IconButton label="Split clip" onClick={split} disabled={!selected}><Scissors size={14} /></IconButton><IconButton label="Duplicate clip" onClick={duplicate} disabled={!selected}><Files size={14} /></IconButton><IconButton label="Move right" onClick={() => move(seconds(0.25))} disabled={!selected}><ChevronRight size={14} /></IconButton><IconButton label="Delete clip" onClick={remove} disabled={!selected}><Trash2 size={14} /></IconButton></div>
     </div>
     {selected && <div className="clip-inspector" aria-label="Selected clip controls">
       <span>{selected.clip.name}</span>
       <label>Speed<select value={selected.clip.playbackRate} onChange={(event) => void dispatch({ type: "changeSpeed", trackId: selected.track.id, clipId: selected.clip.id, playbackRate: Number(event.target.value) }, "Change speed")}><option value="0.5">0.5×</option><option value="1">1×</option><option value="1.5">1.5×</option><option value="2">2×</option></select></label>
       <label>Opacity<input type="range" min="0" max="1" step="0.05" value={selected.clip.transform.opacity} onChange={(event) => void dispatch({ type: "setOpacity", trackId: selected.track.id, clipId: selected.clip.id, opacity: Number(event.target.value) }, "Set opacity")} /></label>
+      <label>X<input className="compact-number" type="number" step="1" value={selected.clip.transform.x} onChange={(event) => void dispatch({ type: "cropClip", trackId: selected.track.id, clipId: selected.clip.id, transform: { ...selected.clip.transform, x: Number(event.target.value) } }, "Position clip")} /></label>
+      <label>Y<input className="compact-number" type="number" step="1" value={selected.clip.transform.y} onChange={(event) => void dispatch({ type: "cropClip", trackId: selected.track.id, clipId: selected.clip.id, transform: { ...selected.clip.transform, y: Number(event.target.value) } }, "Position clip")} /></label>
+      <label>Scale<input className="compact-number" type="number" min="0.1" max="10" step="0.1" value={selected.clip.transform.scale} onChange={(event) => void dispatch({ type: "cropClip", trackId: selected.track.id, clipId: selected.clip.id, transform: { ...selected.clip.transform, scale: Number(event.target.value) } }, "Scale clip")} /></label>
+      <label>Rotate<input className="compact-number" type="number" step="1" value={selected.clip.transform.rotation} onChange={(event) => void dispatch({ type: "cropClip", trackId: selected.track.id, clipId: selected.clip.id, transform: { ...selected.clip.transform, rotation: Number(event.target.value) } }, "Rotate clip")} /></label>
       <label>Volume<input type="range" min="0" max="2" step="0.05" value={selected.clip.audio.volume} onChange={(event) => void dispatch({ type: "setVolume", trackId: selected.track.id, clipId: selected.clip.id, volume: Number(event.target.value) }, "Set volume")} /></label>
+      <label>Fade in<input className="compact-number" type="number" min="0" step="0.1" value={toSeconds(selected.clip.audio.fadeIn)} onChange={(event) => void dispatch({ type: "fadeAudio", trackId: selected.track.id, clipId: selected.clip.id, fadeIn: seconds(Number(event.target.value)), fadeOut: selected.clip.audio.fadeOut }, "Set audio fade")} /></label>
+      <label>Fade out<input className="compact-number" type="number" min="0" step="0.1" value={toSeconds(selected.clip.audio.fadeOut)} onChange={(event) => void dispatch({ type: "fadeAudio", trackId: selected.track.id, clipId: selected.clip.id, fadeIn: selected.clip.audio.fadeIn, fadeOut: seconds(Number(event.target.value)) }, "Set audio fade")} /></label>
       <label className="check-control"><input type="checkbox" checked={selected.clip.audio.ducking} onChange={(event) => void dispatch({ type: "duckAudio", trackId: selected.track.id, clipId: selected.clip.id, enabled: event.target.checked }, "Toggle ducking")} />Duck</label>
+      {selectedAssetId && selectedAssetId !== selected.clip.assetId && <button onClick={() => void dispatch({ type: "replaceClip", trackId: selected.track.id, clipId: selected.clip.id, assetId: selectedAssetId }, "Replace clip")}>Replace with selected media</button>}
+      {outgoingTransition ? <button onClick={() => void dispatch({ type: "removeTransition", transitionId: outgoingTransition.id }, "Remove transition")}>Remove {outgoingTransition.kind}</button> : nextClip && <button onClick={() => void dispatch({ type: "addTransition", fromClipId: selected.clip.id, toClipId: nextClip.id, kind: "crossDissolve", duration: seconds(0.3) }, "Add cross dissolve")}>Cross dissolve</button>}
     </div>}
+    {sequence.captions.length > 0 && <details className="caption-editor"><summary>Captions ({sequence.captions.length})</summary><div>{sequence.captions.map((caption) => <div key={caption.id}>
+      <input aria-label="Caption text" defaultValue={caption.text} onBlur={(event) => { if (event.target.value.trim() && event.target.value !== caption.text) void dispatch({ type: "editCaption", captionId: caption.id, text: event.target.value }, "Edit caption"); }} />
+      <select aria-label="Caption position" value={caption.style.position} onChange={(event) => void dispatch({ type: "styleCaption", captionId: caption.id, style: { ...caption.style, position: event.target.value as "top" | "center" | "bottom" } }, "Style caption")}><option value="top">Top</option><option value="center">Center</option><option value="bottom">Bottom</option></select>
+      <input aria-label="Caption font size" type="number" min="8" max="240" value={caption.style.fontSize} onChange={(event) => void dispatch({ type: "styleCaption", captionId: caption.id, style: { ...caption.style, fontSize: Number(event.target.value) } }, "Style caption")} />
+      <IconButton label="Delete caption" onClick={() => void dispatch({ type: "removeCaption", captionId: caption.id }, "Delete caption")}><Trash2 size={13} /></IconButton>
+    </div>)}</div></details>}
     <div className="timeline-scroll">
       <div className="ruler"><div className="ruler-spacer" />{Array.from({ length: 21 }).map((_, index) => <span key={index} style={{ left: 112 + index * px }}>{index % 5 === 0 ? `00:${String(index).padStart(2, "0")}` : "·"}</span>)}</div>
       <div className="tracks-wrap">
@@ -314,16 +507,17 @@ function AgentPanel({ onClose }: { onClose: () => void }) {
       </div>
       <div className="chat-header-actions"><IconButton label="New chat" onClick={() => { setActiveTab("chat"); setDraft(""); }}><MessageSquarePlus size={15} /></IconButton><IconButton label="More chat options"><MoreHorizontal size={16} /></IconButton><IconButton label="Close chat sidebar" onClick={onClose}><PanelRightClose size={16} /></IconButton></div>
     </div>
-    {activeTab === "chat" ? <div className="messages" role="tabpanel">
-      <div className="message user"><p>Tighten the opening and match the cut to the beat.</p></div>
-      <div className="message assistant"><p>I’ll review the first sequence and prepare a tighter opening.</p><div className="tool-summary"><span><Film size={12} /> Reading timeline</span><span>3 clips checked · ready to edit</span></div></div>
+    {activeTab === "chat" ? <div className="messages agent-empty-state" role="tabpanel">
+      <MessageCircle size={21} />
+      <strong>Agent connection is not enabled yet</strong>
+      <p>The local editor and its protected command service are ready for integration. Codex sign-in and conversations come next.</p>
     </div> : <div className="activity-panel" role="tabpanel">
-      <div><span className="activity-dot" /><p><strong>Timeline analyzed</strong><small>3 clips and 1 audio track</small></p></div>
-      <div><span className="activity-dot complete" /><p><strong>Media indexed</strong><small>Ready</small></p></div>
+      <div><span className="activity-dot complete" /><p><strong>Local command service</strong><small>Ready</small></p></div>
+      <div><span className="activity-dot" /><p><strong>Codex provider</strong><small>Not connected</small></p></div>
     </div>}
-    <form className="composer" onSubmit={(event) => { event.preventDefault(); setDraft(""); }}>
-      <textarea aria-label="Chat message" placeholder="Plan, build, or ask about this edit" value={draft} onChange={(event) => setDraft(event.target.value)} />
-      <div><div className="composer-tools"><button type="button" aria-label="Add context"><Plus size={15} /></button><select aria-label="Model"><option>Codex</option><option>Local model</option></select></div><div className="composer-tools"><button type="button" aria-label="Voice input"><Mic2 size={15} /></button><button className="send-button" type="submit" aria-label="Send message" disabled={!draft.trim()}><Send size={14} /></button></div></div>
+    <form className="composer disabled" onSubmit={(event) => { event.preventDefault(); setDraft(""); }}>
+      <textarea aria-label="Chat message" placeholder="Connect Codex to message the agent" value={draft} onChange={(event) => setDraft(event.target.value)} disabled />
+      <div><div className="composer-tools"><button type="button" aria-label="Add context" disabled><Plus size={15} /></button><select aria-label="Model" disabled><option>Codex · not connected</option></select></div><div className="composer-tools"><button type="button" aria-label="Voice input" disabled><Mic2 size={15} /></button><button className="send-button" type="submit" aria-label="Send message" disabled><Send size={14} /></button></div></div>
     </form>
   </aside>;
 }
@@ -339,16 +533,22 @@ export default function App() {
   const projectFolder = useEditorStore((s) => s.projectFolder);
   const projectError = useEditorStore((s) => s.projectError);
   const setProjectError = useEditorStore((s) => s.setProjectError);
-  const [saveState, setSaveState] = useState<"demo" | "saving" | "saved" | "error">(projectFolder ? "saved" : "demo");
+  const setRecentProjects = useEditorStore((s) => s.setRecentProjects);
+  const [saveState, setSaveState] = useState<"closed" | "saving" | "saved" | "error">(projectFolder ? "saved" : "closed");
   const saveQueue = useRef<Promise<void>>(Promise.resolve());
   const saveRequest = useRef(0);
   const [exportState, setExportState] = useState<"idle" | "exporting">("idle");
   const [exportJob, setExportJob] = useState<MediaJobRecord>();
-  const saveLabel = saveState === "demo" ? "Demo · not saved" : saveState === "saving" ? "Saving…" : saveState === "error" ? "Save failed" : "Saved";
+  const [preferencesOpen, setPreferencesOpen] = useState(false);
+  const saveLabel = saveState === "closed" ? "Create or open a project" : saveState === "saving" ? "Saving…" : saveState === "error" ? "Save failed" : "Saved";
+
+  useEffect(() => {
+    if (isDesktop()) void listRecentProjects().then(setRecentProjects).catch(() => undefined);
+  }, [setRecentProjects]);
 
   useEffect(() => {
     if (!projectFolder) {
-      setSaveState("demo");
+      setSaveState("closed");
       return;
     }
     const request = ++saveRequest.current;
@@ -416,13 +616,13 @@ export default function App() {
     const outputPath = await chooseExportPath(project.name); if (!outputPath) return;
     setExportState("exporting");
     try {
-      const job = await startExportJob({ outputPath, width: sequence.width, height: sequence.height, frameRate: sequence.frameRate, clips: clips.map(({ clip, asset }) => ({ sourcePath: asset!.path, sourceIn: clip.sourceIn, sourceOut: clip.sourceOut, playbackRate: clip.playbackRate })) });
+      const job = await startNativeExportJob(projectFolder, outputPath);
       setExportJob(job);
     } catch (error) { setProjectError(`Export failed: ${error instanceof Error ? error.message : String(error)}`); setExportState("idle"); }
   };
 
   return <main className={`app-shell ${projectsOpen ? "projects-open" : ""} ${agentOpen ? "agent-open" : ""} ${timelineOpen ? "timeline-open" : "timeline-closed"}`}>
-    <ProjectSidebar collapsed={!projectsOpen} />
+    <ProjectSidebar collapsed={!projectsOpen} onPreferences={() => setPreferencesOpen(true)} />
     <button
       className="sidebar-toggle"
       aria-label={projectsOpen ? "Close project sidebar" : "Open project sidebar"}
@@ -436,11 +636,12 @@ export default function App() {
     <div className="workspace">
       <header className="titlebar" data-tauri-drag-region>
         <div><Folder className="header-project-icon" size={15} /><span className="project-breadcrumb">{project.name}</span><span className={`save-state ${saveState}`} aria-live="polite">{saveLabel}</span></div>
-        <div className="title-actions"><button className="share-button" onClick={() => setProjectError("Sharing will be available when this local project is connected.")}><Share2 size={14} /> Share</button><button className="export-button" onClick={() => exportState === "exporting" && exportJob ? void cancelMediaJob(exportJob.id) : void startExport()}><Download size={14} /> {exportState === "exporting" ? `Cancel ${Math.round((exportJob?.progress ?? 0) * 100)}%` : "Export"}</button><IconButton label={`${timelineOpen ? "Close" : "Open"} timeline (⌘J)`} active={timelineOpen} onClick={toggleTimeline}><PanelBottom size={16} /></IconButton><IconButton label={`${agentOpen ? "Close" : "Open"} chat sidebar (⌘⇧I)`} active={agentOpen} onClick={toggleAgent}>{agentOpen ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}</IconButton></div>
+        <div className="title-actions"><button className="export-button" onClick={() => exportState === "exporting" && exportJob ? void cancelMediaJob(exportJob.id) : void startExport()} disabled={!projectFolder}><Download size={14} /> {exportState === "exporting" ? `Cancel ${Math.round((exportJob?.progress ?? 0) * 100)}%` : "Export"}</button><IconButton label={`${timelineOpen ? "Close" : "Open"} timeline (⌘J)`} active={timelineOpen} onClick={toggleTimeline}><PanelBottom size={16} /></IconButton><IconButton label={`${agentOpen ? "Close" : "Open"} chat sidebar (⌘⇧I)`} active={agentOpen} onClick={toggleAgent}>{agentOpen ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}</IconButton></div>
       </header>
       {projectError && <div className="app-notice" role="alert"><span>{projectError}</span><button onClick={() => setProjectError(undefined)}>Dismiss</button></div>}
       <div className="editor-grid"><MediaLibrary /><Viewer /><Timeline /></div>
     </div>
     {agentOpen && <AgentPanel onClose={toggleAgent} />}
+    {preferencesOpen && <PreferencesDialog onClose={() => setPreferencesOpen(false)} />}
   </main>;
 }

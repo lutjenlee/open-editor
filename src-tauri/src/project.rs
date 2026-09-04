@@ -355,9 +355,17 @@ impl ProjectDocument {
                     clip.audio.fade_out.validate()?;
                     let clip_duration = (time_value(clip.source_out) - time_value(clip.source_in))
                         / clip.playback_rate;
+                    let source_duration = self
+                        .media
+                        .iter()
+                        .find(|asset| asset.id == clip.asset_id)
+                        .map(|asset| time_value(asset.duration))
+                        .unwrap_or(0.0);
                     if !media_ids.contains(&clip.asset_id)
                         || clip.source_in.value < 0
                         || time_value(clip.source_out) <= time_value(clip.source_in)
+                        || (source_duration > 0.0
+                            && time_value(clip.source_out) > source_duration + 0.001)
                         || clip.timeline_start.value < 0
                         || clip.playback_rate <= 0.0
                         || clip.transform.scale <= 0.0
@@ -429,6 +437,7 @@ fn time_value(time: RationalTime) -> f64 {
 pub fn initialize_layout(folder: &Path) -> Result<(), ProjectError> {
     let hidden = folder.join(".open-editor");
     for child in [
+        "backups",
         "chats",
         "cache",
         "proxies",
@@ -472,7 +481,31 @@ pub fn load(folder: &Path) -> Result<ProjectDocument, ProjectError> {
     if !path.exists() {
         return Err(ProjectError::NotFound);
     }
-    let mut project: ProjectDocument = serde_json::from_slice(&fs::read(path)?)?;
+    let original = fs::read(&path)?;
+    let mut value: serde_json::Value = serde_json::from_slice(&original)?;
+    let found = value
+        .get("schemaVersion")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0) as u32;
+    if found > CURRENT_SCHEMA_VERSION {
+        return Err(ProjectError::UnsupportedSchema {
+            found,
+            supported: CURRENT_SCHEMA_VERSION,
+        });
+    }
+    if found < CURRENT_SCHEMA_VERSION {
+        initialize_layout(folder)?;
+        let backup = folder.join(".open-editor/backups").join(format!(
+            "open-editor.project.schema-{found}.{}.json",
+            Utc::now().timestamp_millis()
+        ));
+        fs::write(&backup, &original)?;
+        migrate(&mut value, found)?;
+        let migrated: ProjectDocument = serde_json::from_value(value)?;
+        migrated.validate()?;
+        save_atomic(folder, &migrated)?;
+    }
+    let mut project: ProjectDocument = serde_json::from_slice(&fs::read(&path)?)?;
     project.validate()?;
     for asset in &mut project.media {
         let media_path = Path::new(&asset.path);
@@ -492,6 +525,48 @@ pub fn load(folder: &Path) -> Result<ProjectDocument, ProjectError> {
         }
     }
     Ok(project)
+}
+
+fn migrate(value: &mut serde_json::Value, from: u32) -> Result<(), ProjectError> {
+    let root = value
+        .as_object_mut()
+        .ok_or_else(|| ProjectError::Invalid("project root must be an object".into()))?;
+    let mut version = from;
+    while version < CURRENT_SCHEMA_VERSION {
+        match version {
+            0 => {
+                root.entry("conversations")
+                    .or_insert_with(|| serde_json::json!([]));
+                root.entry("hostedContextConsent")
+                    .or_insert_with(|| serde_json::json!(false));
+                root.entry("analysisArtifacts")
+                    .or_insert_with(|| serde_json::json!([]));
+                if let Some(sequences) = root
+                    .get_mut("sequences")
+                    .and_then(serde_json::Value::as_array_mut)
+                {
+                    for sequence in sequences {
+                        if let Some(sequence) = sequence.as_object_mut() {
+                            sequence
+                                .entry("captions")
+                                .or_insert_with(|| serde_json::json!([]));
+                            sequence
+                                .entry("transitions")
+                                .or_insert_with(|| serde_json::json!([]));
+                        }
+                    }
+                }
+                version = 1;
+                root.insert("schemaVersion".into(), serde_json::json!(version));
+            }
+            _ => {
+                return Err(ProjectError::Invalid(format!(
+                    "no migration is available from schema {version}"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn save_atomic(folder: &Path, project: &ProjectDocument) -> Result<(), ProjectError> {
@@ -555,7 +630,35 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         initialize_layout(root.path()).unwrap();
         assert!(root.path().join(".open-editor/proxies").is_dir());
+        assert!(root.path().join(".open-editor/backups").is_dir());
         assert!(root.path().join(".open-editor/.gitignore").is_file());
+    }
+
+    #[test]
+    fn migrates_legacy_projects_after_preserving_a_backup() {
+        let root = tempfile::tempdir().unwrap();
+        let project = ProjectDocument::new("Legacy project".into());
+        let mut legacy = serde_json::to_value(project).unwrap();
+        let object = legacy.as_object_mut().unwrap();
+        object.remove("schemaVersion");
+        object.remove("conversations");
+        object.remove("hostedContextConsent");
+        object.remove("analysisArtifacts");
+        for sequence in object["sequences"].as_array_mut().unwrap() {
+            sequence.as_object_mut().unwrap().remove("captions");
+            sequence.as_object_mut().unwrap().remove("transitions");
+        }
+        let original = serde_json::to_vec_pretty(&legacy).unwrap();
+        fs::write(root.path().join(PROJECT_FILE), &original).unwrap();
+
+        let migrated = load(root.path()).unwrap();
+        assert_eq!(migrated.schema_version, CURRENT_SCHEMA_VERSION);
+        let backups = fs::read_dir(root.path().join(".open-editor/backups"))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(fs::read(backups[0].path()).unwrap(), original);
     }
 
     #[test]

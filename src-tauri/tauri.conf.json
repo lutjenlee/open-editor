@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.lutjenlee.openeditor",
   "build": {
-    "beforeDevCommand": "npm run build:mcp-sidecar && npm run dev",
+    "beforeDevCommand": "npm run build:sidecars && npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run build:sidecars && npm run build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -38,7 +38,12 @@
   },
   "bundle": {
     "active": true,
-    "externalBin": ["binaries/open-editor-mcp"],
+    "externalBin": [
+      "binaries/open-editor-mcp",
+      "binaries/ffmpeg",
+      "binaries/ffprobe",
+      "binaries/whisper-cli"
+    ],
     "targets": ["dmg", "app"],
     "category": "Video",
     "copyright": "Copyright © 2026 Lutjen Lee",

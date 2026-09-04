@@ -3,7 +3,7 @@
 Open Editor is an open-source, local-first macOS video editor designed for natural-language editing. Bring your existing ChatGPT/Codex account or a local Ollama model; the editor turns approved model tool calls into the same validated, undoable commands used by its manual timeline controls.
 
 > [!IMPORTANT]
-> Open Editor is early-stage software. The current build supports folder projects, persistent macOS media bookmarks and relinking, real FFprobe inspection, generated thumbnails/waveforms/proxies, local scene and silence analysis, local media preview, command-based timeline edits, undo/redo, and a first H.264/AAC export path. It is not ready for production editing yet.
+> Open Editor is early-stage software. The current build supports folder projects, persistent macOS media bookmarks and relinking, bundled media tools, generated thumbnails/waveforms/proxies, local scene/silence/transcript analysis, AVFoundation composition playback and export, command-based timeline edits, alternatives, and undo/redo. It is not ready for production editing yet.
 
 ## Product principles
 
@@ -30,7 +30,7 @@ Prerequisites:
 - Node.js 22 or newer
 - Rust stable (`rustup` recommended)
 - Full Xcode with its command-line tools selected
-- FFmpeg/FFprobe available locally while sidecar packaging is under development
+- CMake (only when rebuilding the pinned whisper.cpp and FFmpeg sidecars)
 
 ```bash
 npm install
@@ -61,6 +61,7 @@ My Project/
 ├── open-editor.project.json
 └── .open-editor/
     ├── history.jsonl
+    ├── backups/
     ├── chats/
     ├── cache/
     ├── proxies/
@@ -80,10 +81,10 @@ Current local workflow:
 1. Create or open a folder-backed project.
 2. Import supported media and generate local inspection artifacts.
 3. Double-click media to add it to the appropriate track.
-4. Move, split, delete, undo, redo, save, reopen, and preview selected media.
-5. Export the video track to a local H.264/AAC MP4.
+4. Move, trim, split, duplicate, transform, mix, caption, transition, undo, redo, and create alternative sequences.
+5. Preview the composition and export an H.264/AAC MP4 through AVFoundation.
 
-Proxy creation, analysis, and export now run as observable background jobs; active FFmpeg processes can be cancelled and incomplete export/proxy files are removed. Still in progress before the provider milestone: native AVFoundation composition playback, complete multitrack audio/overlay/caption rendering, offline transcription, and release packaging for the remaining media sidecars.
+Proxy creation, analysis, transcription, and export run as observable, cancellable background jobs. FFmpeg 9.0.1, FFprobe, whisper.cpp 1.9.1, and the MCP adapter are pinned build-time sidecars; the FFmpeg configuration disables GPL and nonfree components. The provider milestone begins only after this local command boundary is stable. See [Codex readiness](docs/CODEX_READINESS.md).
 
 ## License
 

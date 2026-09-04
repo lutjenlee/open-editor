@@ -12,7 +12,7 @@ fn mcp_sidecar_reads_an_authorized_project_through_the_socket() {
     project::create(root.path(), &project).unwrap();
     let service = CommandService::default();
     let info = service
-        .authorize(project.id, root.path().to_path_buf())
+        .authorize(project.id, root.path().to_path_buf(), None)
         .unwrap();
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_open-editor-mcp"))
