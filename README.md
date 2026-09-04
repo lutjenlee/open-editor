@@ -73,7 +73,7 @@ See [Architecture](docs/ARCHITECTURE.md), [Contributing](CONTRIBUTING.md), and [
 
 ## Status
 
-The current development focus is the provider-independent local editor. Codex and Ollama are deliberately not connected yet. A durable Rust dispatcher already accepts revision-checked command envelopes and rejects provider attempts to expand the user-approved media scope; this is the boundary future MCP/provider integrations will use.
+The current development focus is the provider-independent local editor. Codex and Ollama are deliberately not connected yet. A durable Rust dispatcher accepts revision-checked command envelopes and rejects provider attempts to expand the user-approved media scope. A bundled MCP sidecar reaches that dispatcher only through a mode-`0600` per-launch Unix socket, a random capability token, and an app-authorized project ID. It exposes read-only project snapshots and validated editor commands; it has no direct project-file access.
 
 Current local workflow:
 
@@ -83,7 +83,7 @@ Current local workflow:
 4. Move, split, delete, undo, redo, save, reopen, and preview selected media.
 5. Export the video track to a local H.264/AAC MP4.
 
-Still in progress before the provider milestone: native AVFoundation composition playback, complete multitrack audio/overlay/caption rendering, cancellable background-job progress, offline transcription, the local MCP adapter, and release-sidecar packaging.
+Still in progress before the provider milestone: native AVFoundation composition playback, complete multitrack audio/overlay/caption rendering, cancellable background-job progress, offline transcription, and release packaging for the remaining media sidecars.
 
 ## License
 

@@ -22,7 +22,7 @@ Every manual or agent edit becomes an `EditorCommand` envelope containing a comm
 
 ## Agent isolation
 
-The Codex App Server runs as a pinned signed sidecar over `stdio` JSONL/JSON-RPC with an app-specific Codex home. ChatGPT managed sign-in is primary; API-key sign-in is optional. Codex runs with a read-only sandbox and network disabled by default. Editing tools are exposed only through the bundled MCP adapter, which authenticates to the Rust dispatcher through a per-launch Unix socket and random capability token.
+The future Codex App Server process will run as a pinned signed sidecar over `stdio` JSONL/JSON-RPC with an app-specific Codex home. ChatGPT managed sign-in is primary; API-key sign-in is optional. Codex will run with a read-only sandbox and network disabled by default. The provider-independent MCP adapter is already implemented and bundled: it exposes only project snapshots and validated editor commands, and authenticates to the Rust dispatcher through a mode-`0600` per-launch Unix socket and 256-bit random capability token. The running app explicitly authorizes project IDs; the MCP process never receives project-folder paths and has no direct write path.
 
 Ollama is contacted only on loopback. Models must pass a structured-tool capability test before editing is enabled. Calls are bounded by schema validation, cancellation, repeated-call detection, and a maximum tool-round count.
 

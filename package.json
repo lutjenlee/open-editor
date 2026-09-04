@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "build:mcp-sidecar": "bash scripts/build-mcp-sidecar.sh",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",

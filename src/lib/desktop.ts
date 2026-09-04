@@ -6,6 +6,12 @@ export function isDesktop(): boolean {
   return "__TAURI_INTERNALS__" in window;
 }
 
+export interface CommandServiceInfo { socketPath: string; capabilityToken: string }
+
+export async function authorizeCommandProject(folder: string): Promise<CommandServiceInfo> {
+  return invoke<CommandServiceInfo>("authorize_command_project", { folder });
+}
+
 async function chooseFolder(): Promise<string | null> {
   const selection = await open({ directory: true, multiple: false, canCreateDirectories: true });
   return typeof selection === "string" ? selection : null;
@@ -17,6 +23,7 @@ export async function createProjectFolder(): Promise<{ folder: string; project: 
   if (!folder) return null;
   const fallbackName = folder.split("/").filter(Boolean).at(-1) ?? "Untitled project";
   const project = await invoke<ProjectDocument>("create_project", { folder, name: fallbackName });
+  await authorizeCommandProject(folder);
   return { folder, project };
 }
 
@@ -25,12 +32,14 @@ export async function openProjectFolder(): Promise<{ folder: string; project: Pr
   const folder = await chooseFolder();
   if (!folder) return null;
   const project = await invoke<ProjectDocument>("open_project", { folder });
+  await authorizeCommandProject(folder);
   return { folder, project };
 }
 
 export async function openProjectAtPath(folder: string): Promise<{ folder: string; project: ProjectDocument }> {
   if (!isDesktop()) throw new Error("Folder projects require the desktop app.");
   const project = await invoke<ProjectDocument>("open_project", { folder });
+  await authorizeCommandProject(folder);
   return { folder, project };
 }
 

@@ -1,7 +1,8 @@
-mod command;
+pub mod command;
+pub mod command_service;
 mod media;
 mod native;
-mod project;
+pub mod project;
 
 use media::{ExportRequest, MediaInspection};
 use project::{
@@ -9,6 +10,20 @@ use project::{
     ProjectDocument,
 };
 use uuid::Uuid;
+
+pub fn dispatch_persisted(
+    folder: &std::path::Path,
+    envelope: command::CommandEnvelope,
+) -> Result<command::CommandResult, project::ProjectError> {
+    let project = load(folder)?;
+    let result = command::dispatch(project, &envelope)?;
+    save_atomic(folder, &result.project)?;
+    append_history(
+        folder,
+        &serde_json::json!({ "event": "command", "at": chrono::Utc::now().to_rfc3339(), "envelope": envelope, "newProjectRevision": result.new_project_revision, "affectedEntityIds": result.affected_entity_ids, "forwardPatch": result.forward_patch, "inversePatch": result.inverse_patch }),
+    )?;
+    Ok(result)
+}
 
 #[tauri::command]
 fn create_project(folder: String, name: String) -> Result<ProjectDocument, project::ProjectError> {
@@ -42,14 +57,17 @@ fn dispatch_editor_command(
     envelope: command::CommandEnvelope,
 ) -> Result<command::CommandResult, project::ProjectError> {
     let folder = existing_folder(&folder)?;
+    dispatch_persisted(&folder, envelope)
+}
+
+#[tauri::command]
+fn authorize_command_project(
+    folder: String,
+    service: tauri::State<'_, command_service::CommandService>,
+) -> Result<command_service::ServiceInfo, project::ProjectError> {
+    let folder = existing_folder(&folder)?;
     let project = load(&folder)?;
-    let result = command::dispatch(project, &envelope)?;
-    save_atomic(&folder, &result.project)?;
-    append_history(
-        &folder,
-        &serde_json::json!({ "event": "command", "at": chrono::Utc::now().to_rfc3339(), "envelope": envelope, "newProjectRevision": result.new_project_revision, "affectedEntityIds": result.affected_entity_ids, "forwardPatch": result.forward_patch, "inversePatch": result.inverse_patch }),
-    )?;
-    Ok(result)
+    service.authorize(project.id, folder)
 }
 
 #[tauri::command]
@@ -267,12 +285,14 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .manage(command_service::CommandService::default())
         .invoke_handler(tauri::generate_handler![
             create_project,
             open_project,
             save_project,
             record_history,
             dispatch_editor_command,
+            authorize_command_project,
             inspect_media,
             relink_media,
             create_media_proxy,

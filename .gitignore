@@ -150,6 +150,7 @@ vite.config.ts.timestamp-*
 # Rust, Swift, and Tauri build products
 target/
 src-tauri/target/
+src-tauri/binaries/
 native/**/.build/
 
 # Local project data and generated media caches

@@ -5,6 +5,7 @@ description = "A local-first agentic video editor for macOS"
 authors = ["Lutjen Lee"]
 license = "Apache-2.0"
 edition = "2021"
+default-run = "open-editor"
 
 [lib]
 name = "open_editor_lib"
